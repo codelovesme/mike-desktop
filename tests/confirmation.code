@@ -1,0 +1,49 @@
+| Drive the real desktop state machine through a headless native window.
+| The process boundary is mocked so the fixture can inspect every OS effect.
+
+link "support/process_mock.so" as proc
+link "../.code/modules/net_client/2.11.0/net_client-linux-x86_64.so" as auth
+link "../.code/modules/net_client/2.11.0/net_client-linux-x86_64.so" as mike
+link "../.code/modules/net_client/2.11.0/net_client-linux-x86_64.so" as interface
+link "../.code/modules/env/2.11.0/env-linux-x86_64.so" as system_env
+link "../.code/modules/strings/2.11.0/strings-linux-x86_64.so" as strs
+link "../.code/modules/timer/2.11.0/timer-linux-x86_64.so" as clock
+link "../.code/modules/window/2.11.0/window-linux-x86_64.so" as win
+link "../src/files.gene.code"
+link "../src/desktop.gene.code"
+
+emit StartDesktop { headless = true } to this get desktop
+assert desktop ∈ DesktopStarted
+emit SelectRoot { path = "/tmp/allowed" } to this get chosen
+assert chosen ∈ RootSelected
+
+emit ReceiveTask { task = InterfaceTask { id = "decline-task", goal = "find and open invoice" } } to this
+emit Say { stdout = "/tmp/allowed/invoice.pdf\n" } to proc
+emit Key { id = desktop.id, name = "i", text = "invoice" } to this
+emit Key { id = desktop.id, name = "enter", text = "" } to this
+emit Text { id = desktop.id } to win get review
+emit Contains { text = review.rows[5], needle = "File: /tmp/allowed/invoice.pdf" } to this get file_visible
+assert file_visible.yes
+emit Ran to proc get before
+assert before.items[0].command = "find"
+emit Length { value = before.items } to core get before_count
+assert before_count.value = 1
+emit Key { id = desktop.id, name = "n", text = "n" } to this
+emit Ran to proc get declined
+emit Length { value = declined.items } to core get declined_count
+assert declined_count.value = 1
+
+emit ReceiveTask { task = InterfaceTask { id = "approve-task", goal = "find and open invoice" } } to this
+emit Say { stdout = "/tmp/allowed/invoice.pdf\n" } to proc
+emit Key { id = desktop.id, name = "i", text = "invoice" } to this
+emit Key { id = desktop.id, name = "enter", text = "" } to this
+emit Ran to proc get still_before
+emit Length { value = still_before.items } to core get still_count
+assert still_count.value = 2
+emit Key { id = desktop.id, name = "y", text = "y" } to this
+emit Ran to proc get approved
+emit Length { value = approved.items } to core get approved_count
+assert approved_count.value = 3
+assert approved.items[2].command = "xdg-open"
+assert approved.items[2].args = ["/tmp/allowed/invoice.pdf"]
+emit CloseRequested { id = desktop.id } to this

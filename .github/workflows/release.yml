@@ -1,0 +1,58 @@
+name: Release Mike Desktop
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+env:
+  CDLVSM_CODE_VERSION: v2.11.0
+  CDLVSM_EUGLENA_VERSION: v0.4.3
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Window dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends xvfb libxkbcommon0 libxkbcommon-x11-0 fonts-dejavu-core fontconfig
+      - name: Install Euglena and Code
+        run: |
+          curl -sSf https://raw.githubusercontent.com/codelovesme/cdlvsm/main/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/cdlvsm" install euglena
+      - name: Verify and package
+        run: |
+          cp .env.example .env
+          cdlvsm euglena install
+          cdlvsm code build tests/support/process_mock.code --target shared -o tests/support/process_mock.so
+          cdlvsm euglena test
+          cdlvsm euglena format --check
+          if [ "${{ github.ref_type }}" = tag ]; then version="${{ github.ref_name }}"; else version=dev; fi
+          python3 tools/package.py "$version" dist
+          dist/mike-desktop-"$version"-x86_64-linux/mike-desktop --version
+      - name: Smoke test extracted bundle
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = tag ]; then version="${{ github.ref_name }}"; else version=dev; fi
+          mkdir -p "$RUNNER_TEMP/bare-home"
+          set +e
+          HOME="$RUNNER_TEMP/bare-home" MIKE_DESKTOP_CODE_BIN="$HOME/.local/bin/cdlvsm-code" \
+            timeout 8s xvfb-run -a dist/mike-desktop-"$version"-x86_64-linux/mike-desktop
+          result=$?
+          set -e
+          test "$result" -eq 124
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mike-desktop-bundle
+          path: dist/*.tar.gz
+      - name: Publish
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/*.tar.gz --title "Mike Desktop ${{ github.ref_name }}" --generate-notes

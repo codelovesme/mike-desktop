@@ -1,0 +1,449 @@
+| Mike stays on the server. This window owns the person's input and the local
+| decision to search and open a file. One line is edited at a time.
+
+window_id = ""
+mode = "email"
+line = ""
+email = ""
+password = ""
+token = ""
+device_id = ""
+credential = ""
+root = ""
+task_id = ""
+task_goal = ""
+match_path = ""
+turn_id = ""
+connection = "sign in"
+message = ""
+reply = ""
+pending = null
+active = true
+state_dir = ""
+state_ready = false
+reading_id = ""
+
+StartDesktop { headless } =>
+    emit Get { name = "MIKE_DESKTOP_HOST_URL", default = "" } to system_env get host_url
+    if host_url ∉ Exception and host_url.value ∈ String and host_url.value ≠ ""
+        emit Config { url = host_url.value + "/auth" } to auth
+        emit Config { url = host_url.value + "/mike" } to mike
+        emit Config { url = host_url.value + "/mike-interface" } to interface
+    if headless ≠ true
+        emit PrepareStore to this
+    emit Open { title = "Mike Desktop", cols = 88, rows = 18, headless = headless } to win get opened
+    if opened ∈ Exception
+        return opened
+    window_id = opened.id
+    emit DrawDesktop to this
+    return DesktopStarted { id = window_id }
+
+| The identity file contains a device credential, so create it with mode 0600
+| inside a 0700 directory. No shell interprets any path or content.
+PrepareStore =>
+    emit Get { name = "HOME" } to system_env get home
+    if home ∈ Exception or home.value ∉ String or home.value = ""
+        return StoreUnavailable
+    state_dir = home.value + "/.local/state/mike-desktop"
+    emit Run { command = "mkdir", args = ["-p", state_dir] } to proc get created
+    if created ∈ Exception or not created.success
+        return StoreUnavailable
+    emit Run { command = "chmod", args = ["700", state_dir] } to proc get private_dir
+    if private_dir ∈ Exception or not private_dir.success
+        return StoreUnavailable
+    state_ready = true
+    return StoreReady
+
+LoadIdentity { owner } =>
+    if not state_ready
+        return NoIdentity
+    emit Run { command = "cat", args = [state_dir + "/owner"] } to proc get saved_owner
+    if saved_owner ∈ Exception or not saved_owner.success or saved_owner.stdout ≠ owner
+        return NoIdentity
+    emit Run { command = "cat", args = [state_dir + "/device_id"] } to proc get saved_id
+    emit Run { command = "cat", args = [state_dir + "/credential"] } to proc get saved_credential
+    if saved_id ∈ Exception or saved_credential ∈ Exception
+        return NoIdentity
+    if not saved_id.success or not saved_credential.success
+        return NoIdentity
+    if saved_id.stdout = "" or saved_credential.stdout = ""
+        return NoIdentity
+    return SavedIdentity { device_id = saved_id.stdout, credential = saved_credential.stdout }
+
+SaveIdentity { owner, id, secret } =>
+    if not state_ready
+        return StoreUnavailable
+    emit Run { command = "install", args = ["-m", "600", "/dev/stdin", state_dir + "/owner"], stdin = owner } to proc get one
+    emit Run { command = "install", args = ["-m", "600", "/dev/stdin", state_dir + "/device_id"], stdin = id } to proc get two
+    emit Run { command = "install", args = ["-m", "600", "/dev/stdin", state_dir + "/credential"], stdin = secret } to proc get three
+    if one ∈ Exception or two ∈ Exception or three ∈ Exception
+        return StoreUnavailable
+    if not one.success or not two.success or not three.success
+        return StoreUnavailable
+    return StoreReady
+
+DrawDesktop =>
+    prompt = "Email"
+    if mode = "password", prompt = "Password"
+    if mode = "root", prompt = "Folder to search (absolute path)"
+    if mode = "ready", prompt = "Ask Mike, or use /folder, /speak, /read"
+    if mode = "query", prompt = "Filename words to search"
+    if mode = "file_confirm", prompt = "Open this exact file? Press Y or N"
+    if mode = "mike_confirm", prompt = "Allow Mike's task? Press Y or N"
+    display = line
+    if mode = "password", display = "(hidden)"
+    rows = [
+        ["Mike Desktop  |  " + connection]
+        ["Signed in: " + email]
+        ["Search folder: " + root]
+        [""]
+        ["Task: " + task_goal]
+        ["File: " + match_path]
+        [""]
+        ["Mike: " + reply]
+        ["Status: " + message]
+        [""]
+        [prompt + ":"]
+        ["> " + display]
+        [""]
+        ["Enter submits. /speak records 8 seconds. /read plays Mike's reply."]
+        ["Desktop tasks require Mike's approval and a second local approval."]
+        ["The desktop only searches the folder you selected."]
+    ]
+    emit Draw { id = window_id, rows = rows } to win
+    return DrawnDesktop
+
+Key { id, name, text } =>
+    if id ≠ window_id
+        return Ignored
+    if mode = "file_confirm" or mode = "mike_confirm"
+        if name = "y" or name = "Y"
+            emit Decide { yes = true } to this
+        if name = "n" or name = "N" or name = "escape"
+            emit Decide { yes = false } to this
+        return Noted
+    if name = "escape" and mode = "query"
+        emit FinishTask { outcome = "declined", detail = "the person cancelled the search" } to this
+        return Noted
+    if name = "enter"
+        emit SubmitLine to this
+        return Noted
+    if name = "backspace"
+        emit Length { value = line } to core get count
+        if count.value > 0
+            line = line[0, count.value - 1)
+        emit DrawDesktop to this
+        return Noted
+    if text ∈ String and text ≠ ""
+        emit Length { value = line } to core get count
+        if count.value < 500
+            line += text
+        emit DrawDesktop to this
+    return Noted
+
+SubmitLine =>
+    emit Trim { value = line } to strs get trimmed
+    value = trimmed.value
+    line = ""
+    if mode = "email"
+        email = value
+        mode = "password"
+        emit DrawDesktop to this
+        return Noted
+    if mode = "password"
+        password = value
+        emit SignIn to this
+        return Noted
+    if mode = "root"
+        emit SelectRoot { path = value } to this
+        emit DrawDesktop to this
+        return Noted
+    if mode = "query"
+        emit FindLocalFile { root = root, query = value } to this get result
+        if result ∈ FileFound
+            match_path = result.path
+            mode = "file_confirm"
+            message = "Review the exact file, then press Y or N."
+        if result ∈ FileRefused
+            message = result.reason
+        emit DrawDesktop to this
+        return Noted
+    if mode = "ready"
+        if value = "/folder"
+            mode = "root"
+            emit DrawDesktop to this
+            return Noted
+        if value = "/speak"
+            emit CaptureSpeech to this
+            return Noted
+        if value = "/read"
+            emit ReadReply to this
+            return Noted
+        if value = ""
+            return Noted
+        emit SendQuestion { text = value } to this
+    return Noted
+
+SendQuestion { text } =>
+    if mode ≠ "ready"
+        return Refused
+    if text ∉ String or text = ""
+        return Refused
+    if token = ""
+        message = "Sign in first."
+        emit DrawDesktop to this
+        return Refused
+    if turn_id ≠ ""
+        message = "Wait for Mike's current turn to finish."
+        emit DrawDesktop to this
+        return Noted
+    emit Send { particle = Impulse { token = token, particle = Ask { text = text } } } to mike get started
+    if started ∈ Thinking
+        turn_id = started.turn_id
+        reply = "Thinking about: " + text
+        message = "Mike is working."
+    if started ∉ Thinking
+        connection = "Mike unavailable"
+        message = "Mike did not start the turn. Try again."
+    emit DrawDesktop to this
+    return Asked
+
+CaptureSpeech =>
+    if not state_ready or token = ""
+        message = "Microphone unavailable until this desktop is signed in with secure local storage."
+        emit DrawDesktop to this
+        return Unavailable
+    if turn_id ≠ "" or task_id ≠ ""
+        message = "Finish the current turn or task before speaking."
+        emit DrawDesktop to this
+        return Refused
+    message = "Recording for eight seconds..."
+    emit DrawDesktop to this
+    path = state_dir + "/question.wav"
+    emit Run { command = "arecord", args = ["-q", "-d", "8", "-f", "S16_LE", "-r", "16000", "-c", "1", path] } to proc get recorded
+    if recorded ∈ Exception or not recorded.success
+        emit Run { command = "unlink", args = [path] } to proc
+        message = "The microphone is unavailable or access was denied."
+        emit DrawDesktop to this
+        return Unavailable
+    emit Run { command = "base64", args = ["-w", "0", path] } to proc get encoded
+    if encoded ∈ Exception or not encoded.success or encoded.stdout = ""
+        emit Run { command = "unlink", args = [path] } to proc
+        message = "Could not read the recording."
+        emit DrawDesktop to this
+        return Unavailable
+    emit Send { particle = Impulse { token = token, particle = Hear { audio_base64 = encoded.stdout, format = "wav" } } } to mike get heard
+    emit Run { command = "unlink", args = [path] } to proc
+    if heard ∈ Heard and heard.text ∈ String and heard.text ≠ ""
+        message = "Heard: " + heard.text
+        emit SendQuestion { text = heard.text } to this
+        return HeardQuestion
+    message = "Mike could not make out the recording."
+    emit DrawDesktop to this
+    return Unavailable
+
+ReadReply =>
+    if not state_ready or token = "" or reply = "" or turn_id ≠ ""
+        message = "There is no reply to read aloud."
+        emit DrawDesktop to this
+        return Refused
+    emit Send { particle = Impulse { token = token, particle = Read { text = reply } } } to mike get speaking
+    if speaking ∈ Speaking
+        reading_id = speaking.reading_id
+        message = "Mike is preparing speech."
+    if speaking ∉ Speaking
+        message = "Speech is unavailable."
+    emit DrawDesktop to this
+    return Reading
+
+PlaySpeech { audio_base64, format } =>
+    if format ≠ "wav" or audio_base64 ∉ String or audio_base64 = ""
+        return Unavailable
+    path = state_dir + "/reply.wav"
+    emit Run { command = "openssl", args = ["base64", "-d", "-A", "-out", path], stdin = audio_base64 } to proc get decoded
+    if decoded ∈ Exception or not decoded.success
+        emit Run { command = "unlink", args = [path] } to proc
+        return Unavailable
+    emit Run { command = "aplay", args = ["-q", path] } to proc get played
+    emit Run { command = "unlink", args = [path] } to proc
+    if played ∈ Exception or not played.success
+        return Unavailable
+    return Played
+
+SelectRoot { path } =>
+    if path ∉ String or path = "" or path[0, 1) ≠ "/"
+        message = "Enter an absolute folder path."
+        return RootRefused
+    root = path
+    mode = "ready"
+    message = "Folder selected. Ask Mike to find and open a file."
+    return RootSelected
+
+SignIn =>
+    emit Send { particle = Open { particle = Authenticate { email = email, password = password } } } to auth get signed
+    password = ""
+    if signed ∉ SignedIn
+        connection = "sign in failed"
+        mode = "password"
+        message = "Check the email and password, then press Enter."
+        emit DrawDesktop to this
+        return Noted
+    token = signed.token
+    emit LoadIdentity { owner = email } to this get saved
+    if saved ∈ SavedIdentity
+        emit Send { particle = Impulse { token = token, particle = Heartbeat { device_id = saved.device_id, credential = saved.credential, capabilities = ["file_search", "file_open"] } } } to interface get reused
+        if reused ∈ DeviceOnline
+            device_id = saved.device_id
+            credential = saved.credential
+            connection = "connected"
+            mode = "root"
+            message = "Choose the folder Mike may search on this desktop."
+            emit LoadRecentReply to this
+            emit DrawDesktop to this
+            return SignedInDesktop
+    emit Send { particle = Impulse { token = token, particle = PairDevice { name = "Mike Desktop", platform = "linux" } } } to interface get paired
+    if paired ∉ DevicePaired
+        connection = "gateway unavailable"
+        mode = "password"
+        message = "The device gateway could not pair this desktop."
+        emit DrawDesktop to this
+        return Noted
+    device_id = paired.device_id
+    credential = paired.credential
+    emit SaveIdentity { owner = email, id = device_id, secret = credential } to this get stored
+    emit Send { particle = Impulse { token = token, particle = SetDefaultDevice { device_id = device_id } } } to interface
+    emit Send { particle = Impulse { token = token, particle = Heartbeat { device_id = device_id, credential = credential, capabilities = ["file_search", "file_open"] } } } to interface get first_pulse
+    connection = "offline"
+    if first_pulse ∈ DeviceOnline, connection = "connected"
+    mode = "root"
+    message = "Choose the folder Mike may search on this desktop."
+    if stored ∉ StoreReady
+        message = "Connected, but this desktop could not securely save its pairing; sign in again next launch."
+    emit LoadRecentReply to this
+    emit DrawDesktop to this
+    return SignedInDesktop
+
+LoadRecentReply =>
+    emit Send { particle = Impulse { token = token, particle = RecentConversation { limit = 1 } } } to mike get recent
+    if recent ∈ Recent and recent.ok and recent.turns ≠ []
+        reply = recent.turns[0].reply
+    return RecentLoaded
+
+DesktopTick =>
+    if not active
+        return Stopped
+    emit RefreshDesktop to this
+    emit Delay { ms = 2500, then = "DesktopTick" } to clock
+    return TickDone
+
+RefreshDesktop =>
+    if not active
+        return Stopped
+    if token ≠ "" and credential ≠ ""
+        emit Send { particle = Impulse { token = token, particle = Heartbeat { device_id = device_id, credential = credential, capabilities = ["file_search", "file_open"] } } } to interface get pulse
+        if pulse ∈ DeviceOnline
+            connection = "connected"
+            if task_id = ""
+                emit Send { particle = Impulse { token = token, particle = ClaimTask { device_id = device_id, credential = credential } } } to interface get task
+                if task ∈ InterfaceTask
+                    emit ReceiveTask { task = task } to this
+        if pulse ∉ DeviceOnline
+            connection = "offline"
+        if turn_id = "" and mode = "ready"
+            emit Send { particle = Impulse { token = token, particle = ActiveTurns } } to mike get active_turns
+            if active_turns ∈ ActiveTurns and active_turns.items ≠ []
+                emit Length { value = active_turns.items } to core get active_count
+                latest = active_turns.items[active_count.value - 1]
+                turn_id = latest.turn_id
+                reply = "Following: " + latest.text
+        if turn_id ≠ ""
+            emit Send { particle = Impulse { token = token, particle = Progress { turn_id = turn_id } } } to mike get progress
+            if progress ∈ Turn
+                emit ObserveTurn { turn = progress } to this
+            if progress ∈ Exception
+                connection = "Mike unavailable"
+        if reading_id ≠ ""
+            emit Send { particle = Impulse { token = token, particle = Spoken { reading_id = reading_id } } } to mike get speech
+            if speech ∈ Speech and speech.stage = "ready"
+                reading_id = ""
+                emit PlaySpeech { audio_base64 = speech.audio_base64, format = speech.format } to this get played
+                if played ∈ Played, message = "Mike's reply was played."
+                if played ∉ Played, message = "The speaker is unavailable or the sound could not be played."
+            if speech ∈ Speech and speech.stage = "failed"
+                reading_id = ""
+                message = "Mike could not prepare speech."
+            if speech ∉ Speech
+                reading_id = ""
+                message = "Mike's speech connection is unavailable."
+    emit DrawDesktop to this
+    return Refreshed
+
+ObserveTurn { turn } =>
+    if turn.stage = "confirm" and mode = "ready"
+        pending = turn.pending
+        mode = "mike_confirm"
+        message = turn.pending.say
+    if turn.stage = "done"
+        reply = turn.reply
+        turn_id = ""
+        pending = null
+        if mode = "mike_confirm", mode = "ready"
+    if turn.stage = "failed"
+        reply = turn.reply
+        turn_id = ""
+        pending = null
+        if mode = "mike_confirm", mode = "ready"
+    return Observed
+
+ReceiveTask { task } =>
+    task_id = task.id
+    task_goal = task.goal
+    match_path = ""
+    mode = "query"
+    line = ""
+    message = "This desktop can find and open a file. Enter filename words, or Escape to decline Mike's request."
+    emit DrawDesktop to this
+    return TaskShown
+
+Decide { yes } =>
+    if mode = "mike_confirm"
+        emit Send { particle = Impulse { token = token, particle = Confirm { turn_id = turn_id, yes = yes } } } to mike
+        pending = null
+        mode = "ready"
+        message = "Decision sent to Mike."
+    if mode = "file_confirm"
+        if yes
+            emit OpenLocalFile { path = match_path } to this get opened
+            if opened ∈ FileOpened
+                emit FinishTask { outcome = "opened", detail = opened.path } to this
+            if opened ∈ FileRefused
+                emit FinishTask { outcome = "failed", detail = opened.reason } to this
+        if not yes
+            emit FinishTask { outcome = "declined", detail = "the person declined to open the file" } to this
+    emit DrawDesktop to this
+    return Decided
+
+FinishTask { outcome, detail } =>
+    if token = "" or credential = ""
+        message = "Desktop task: " + outcome + " (gateway disconnected)"
+        task_id = ""
+        task_goal = ""
+        match_path = ""
+        mode = "ready"
+        return TaskFinished
+    emit Send { particle = Impulse { token = token, particle = CompleteTask { device_id = device_id, credential = credential, id = task_id, outcome = outcome, detail = detail } } } to interface get completed
+    if completed ∈ TaskCompleted
+        message = "Desktop task: " + outcome
+    if completed ∉ TaskCompleted
+        message = "Could not report the task result to Mike."
+    task_id = ""
+    task_goal = ""
+    match_path = ""
+    mode = "ready"
+    return TaskFinished
+
+CloseRequested { id } =>
+    if id = window_id
+        active = false
+        emit Close { id = id } to win
+    return ClosedDesktop

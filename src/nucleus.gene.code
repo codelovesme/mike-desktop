@@ -1,0 +1,2 @@
+emit StartDesktop to this
+emit Delay { ms = 2500, then = "DesktopTick" } to clock

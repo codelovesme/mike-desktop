@@ -1,0 +1,17 @@
+{
+  "code": ">=2.11.0",
+  "description": "A native desktop interface for Mike with a locally confirmed file search and open workflow.",
+  "name": "mike-desktop",
+  "organelles": {
+    "auth": { "module": "net_client", "config": { "url": "${AUTH_URL}" } },
+    "clock": "timer",
+    "system_env": "env",
+    "interface": { "module": "net_client", "config": { "url": "${MIKE_INTERFACE_URL}" } },
+    "mike": { "module": "net_client", "config": { "url": "${MIKE_URL}" } },
+    "proc": "process",
+    "strs": "strings",
+    "win": "window"
+  },
+  "runtime": "native",
+  "title": "Mike Desktop"
+}

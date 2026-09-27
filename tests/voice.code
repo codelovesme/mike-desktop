@@ -1,0 +1,28 @@
+| Native speech playback keeps base64 data on stdin and calls fixed programs.
+| Unsupported formats never reach a player.
+
+link "../.code/modules/net_client/2.11.0/net_client-linux-x86_64.so" as auth
+link "../.code/modules/net_client/2.11.0/net_client-linux-x86_64.so" as mike
+link "../.code/modules/net_client/2.11.0/net_client-linux-x86_64.so" as interface
+link "../.code/modules/env/2.11.0/env-linux-x86_64.so" as system_env
+link "support/process_mock.so" as proc
+link "../.code/modules/strings/2.11.0/strings-linux-x86_64.so" as strs
+link "../.code/modules/timer/2.11.0/timer-linux-x86_64.so" as clock
+link "../.code/modules/window/2.11.0/window-linux-x86_64.so" as win
+link "../src/files.gene.code"
+link "../src/desktop.gene.code"
+
+emit PlaySpeech { audio_base64 = "AAAA", format = "mp3" } to this get refused
+assert refused ∈ Unavailable
+emit Ran to proc get nothing
+assert nothing.items = []
+
+emit PlaySpeech { audio_base64 = "UklGRg==", format = "wav" } to this get played
+assert played ∈ Played
+emit Ran to proc get calls
+emit Length { value = calls.items } to core get count
+assert count.value = 3
+assert calls.items[0].command = "openssl"
+assert calls.items[0].args[0] = "base64"
+assert calls.items[1].command = "aplay"
+assert calls.items[2].command = "unlink"

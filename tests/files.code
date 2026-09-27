@@ -1,0 +1,48 @@
+| The only OS effects are fixed programs with separate arguments. A goal
+| cannot become an executable or a path. The UI calls OpenLocalFile only after
+| the exact match is shown and accepted.
+
+link "support/process_mock.so" as proc
+link "../.code/modules/strings.so" as strs
+link "../src/files.gene.code"
+
+emit FindLocalFile { root = "relative", query = "invoice" } to this get relative
+assert relative ∈ FileRefused
+emit FindLocalFile { root = "/tmp/allowed", query = "../secret" } to this get slash
+assert slash ∈ FileRefused
+emit Ran to proc get before
+assert before.items = []
+
+emit Say { stdout = "/tmp/allowed/invoice.pdf\n" } to proc
+emit FindLocalFile { root = "/tmp/allowed", query = "invoice" } to this get found
+assert found ∈ FileFound
+assert found.path = "/tmp/allowed/invoice.pdf"
+emit Ran to proc get searched
+emit Length { value = searched.items } to core get one
+assert one.value = 1
+assert searched.items[0].command = "find"
+assert searched.items[0].args = ["-P", "/tmp/allowed", "-maxdepth", "6", "-type", "f", "-iname", "*invoice*", "-print", "-quit"]
+
+| A shell-looking query remains a single inert filename argument.
+emit FindLocalFile { root = "/tmp/allowed", query = "x; touch /tmp/oops" } to this get refused
+assert refused ∈ FileRefused
+emit FindLocalFile { root = "/tmp/allowed", query = "\$(touch PWNED)" } to this get no_match
+assert no_match ∈ FileRefused
+emit Ran to proc get still_searches
+assert still_searches.items[1].command = "find"
+assert still_searches.items[1].args[7] = "*\$(touch PWNED)*"
+
+| The file opener receives exactly the locally found and approved path.
+emit OpenLocalFile { path = found.path } to this get opened
+assert opened ∈ FileOpened
+emit Ran to proc get all
+emit Length { value = all.items } to core get count
+assert count.value = 3
+assert all.items[2].command = "xdg-open"
+assert all.items[2].args = ["/tmp/allowed/invoice.pdf"]
+
+| Whitespace in a real filename is preserved; only find's final newline goes.
+emit Say { stdout = "/tmp/allowed/trailing space .txt \n" } to proc
+emit FindLocalFile { root = "/tmp/allowed", query = "trailing" } to this get spaced
+assert spaced ∈ FileFound
+assert spaced.path = "/tmp/allowed/trailing space .txt "

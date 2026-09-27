@@ -1,0 +1,53 @@
+| Local file workflow. The root and query are supplied by the person in the
+| desktop window. A remote task is only an invitation to start this workflow.
+
+FindLocalFile { root, query } =>
+    if root ∉ String or query ∉ String
+        return FileRefused { reason = "choose a folder and enter a filename" }
+    emit Length { value = root } to core get root_length
+    emit Length { value = query } to core get query_length
+    if root_length.value < 2 or root_length.value > 500 or root[0, 1) ≠ "/"
+        return FileRefused { reason = "choose an absolute folder path" }
+    if query_length.value < 2 or query_length.value > 100
+        return FileRefused { reason = "enter 2 to 100 filename characters" }
+    emit Contains { text = query, needle = "/" } to this get slash
+    if slash.yes
+        return FileRefused { reason = "enter a filename, not a path" }
+    emit Run { command = "find", args = ["-P", root, "-maxdepth", "6", "-type", "f", "-iname", "*" + query + "*", "-print", "-quit"] } to proc get found
+    if found ∈ Exception or not found.success
+        return FileRefused { reason = "could not search that folder" }
+    emit Length { value = found.stdout } to core get output_length
+    if output_length.value = 0
+        return FileRefused { reason = "no matching file in that folder" }
+    path = found.stdout
+    if found.stdout[output_length.value - 1, output_length.value) = "\n"
+        path = found.stdout[0, output_length.value - 1)
+    if path = ""
+        return FileRefused { reason = "no matching file in that folder" }
+    return FileFound { path = path }
+
+| This handler is called only after a fresh local confirmation of the exact
+| path. It does not accept a server-supplied path.
+OpenLocalFile { path } =>
+    if path ∉ String or path = ""
+        return FileRefused { reason = "no file was selected" }
+    emit Run { command = "xdg-open", args = [path] } to proc get opened
+    if opened ∈ Exception or not opened.success
+        return FileRefused { reason = "the desktop could not open the file" }
+    return FileOpened { path = path }
+
+Contains { text, needle } =>
+    emit Length { value = text } to core get text_length
+    emit Length { value = needle } to core get size
+    if size.value = 0
+        return ContainsResult { yes = true }
+    if size.value > text_length.value
+        return ContainsResult { yes = false }
+    i = 0
+    loop
+        if i + size.value > text_length.value
+            break
+        if text[i, i + size.value) = needle
+            return ContainsResult { yes = true }
+        i = i + 1
+    return ContainsResult { yes = false }

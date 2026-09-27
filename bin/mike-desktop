@@ -1,0 +1,38 @@
+#!/bin/sh
+# Start the versioned Euglena bundle through Code. The server connection stays
+# on loopback; a remote desktop uses tools/remote-tunnel.sh first.
+set -eu
+launcher_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+here=$launcher_dir
+if [ ! -f "$here/main.code" ]; then
+    here=$(CDPATH= cd -- "$launcher_dir/.." && pwd)
+fi
+case "${1:-}" in
+  --version|-V) printf 'mike-desktop %s\n' "$(cat "$here/VERSION" 2>/dev/null || printf dev)"; exit 0 ;;
+  --help|-h) printf 'Usage: mike-desktop\nMIKE_DESKTOP_HOST_URL=http://127.0.0.1:8899 (or an SSH tunnel port)\n'; exit 0 ;;
+esac
+[ "$#" -eq 0 ] || { echo 'mike-desktop: unexpected argument' >&2; exit 2; }
+host=${MIKE_DESKTOP_HOST_URL:-http://127.0.0.1:8899}
+case "$host" in
+  http://127.0.0.1:*|http://localhost:*) ;;
+  *) echo 'mike-desktop: host URL must be HTTP on loopback; use an SSH tunnel for a remote server' >&2; exit 2 ;;
+esac
+port=${host##*:}
+case "$port" in
+  ''|*[!0-9]*) echo 'mike-desktop: host URL needs a numeric port and no path' >&2; exit 2 ;;
+esac
+MIKE_DESKTOP_HOST_URL=$host
+export MIKE_DESKTOP_HOST_URL
+if [ -n "${MIKE_DESKTOP_CODE_BIN:-}" ]; then
+    interpreter=$MIKE_DESKTOP_CODE_BIN
+elif [ -x "$here/../../code/current/code" ]; then
+    interpreter="$here/../../code/current/code"
+else
+    interpreter=$(command -v cdlvsm-code || true)
+fi
+[ -n "$interpreter" ] && [ -x "$interpreter" ] || {
+    echo 'mike-desktop: Code 2.11 is needed; install with cdlvsm install mike-desktop' >&2
+    exit 1
+}
+cd "$here"
+exec "$interpreter" run main.code

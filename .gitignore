@@ -1,0 +1,10 @@
+# Installed module binaries. The lockfile beside them pins what they are,
+# so a checkout can reproduce them with `code install`.
+.code/modules/
+main.code
+.env
+
+# Where `code build <directory>` puts artifacts.
+build/
+dist/
+tests/support/*.so

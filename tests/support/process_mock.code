@@ -1,0 +1,43 @@
+| A stand-in for the `process` module: nothing runs; every Run is kept in
+| an outbox a fixture can read, and answers as told.
+|
+| Test-only handlers:
+|   Ran => Commands { items = [{ command, args }] }
+|   Reset => ResetDone { ok = true }
+|   Fail { code, stderr } => the next Run answers with it
+|   Say { stdout } => queue one command's stdout; Runs take them in turn,
+|                     and a Run past the end answers ""
+
+ran = []
+next_code = 0
+next_stderr = ""
+lines = []
+
+Run { command, args } =>
+    ran += [{ command = command, args = args }]
+    code = next_code
+    err = next_stderr
+    next_code = 0
+    next_stderr = ""
+    out = ""
+    if lines ≠ []
+        out = lines[0]
+        lines = lines (0, length)
+    return RunResult { code = code, success = code = 0, stdout = out, stderr = err }
+
+Say { stdout } =>
+    lines += [stdout]
+    return Saying { queued = lines }
+
+Fail { code, stderr } =>
+    next_code = code
+    next_stderr = stderr
+    return Failing { ok = true }
+
+Ran =>
+    return Commands { items = ran }
+
+Reset =>
+    ran = []
+    lines = []
+    return ResetDone { ok = true }
