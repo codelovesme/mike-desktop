@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 
-DESKTOP = Path(__file__).resolve().parents[1]
+DESKTOP = Path(os.environ.get("E2E_DESKTOP_DIR", str(Path(__file__).resolve().parents[1])))
 CODE = Path(os.environ.get("CODE_BIN", str(DESKTOP.parents[1] / "code/target/debug/code")))
 HOST = os.environ.get("EUGLENA_HOST_URL", "http://127.0.0.1:8899").rstrip("/")
 EMAIL = os.environ.get("E2E_EMAIL", "")
@@ -37,6 +37,9 @@ def request(app, particle, token=None):
 
 
 def module(name):
+    bundled = DESKTOP / (name + ".so")
+    if bundled.is_file():
+        return str(bundled)
     return str(DESKTOP / ".code/modules" / name / "2.11.0" / (name + "-linux-x86_64.so"))
 
 

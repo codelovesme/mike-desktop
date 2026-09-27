@@ -96,6 +96,10 @@ full live workflow:
 
     E2E_EMAIL=... E2E_PASSWORD=... python3 tools/live-e2e.py
 
+Set `E2E_DESKTOP_DIR` to an installed release's `current` directory and
+`CODE_BIN` to its Code interpreter to run the same check against the
+published bundle instead of the source tree.
+
 It starts a real Mike turn, approves Mike's request in a headless native
 window, claims the desktop task, enters a filename, approves the exact match,
 and verifies the single file opener call and Mike's saved reply. The file
