@@ -12,5 +12,5 @@
 ## Verification
 
 - Public repository: https://github.com/codelovesme/mike-desktop; release `v0.1.1` passed GitHub Actions, including `euglena test`, package integrity checks, and an extracted window running under Xvfb with a clean home. The first tag's smoke check caught a runner path error; `v0.1.1` fixed it and passed.
-- CDLVSM `v0.9.0` was published. An isolated install fetched both public releases, installed Code, created `codelovesme-mike-desktop.desktop`, dispatched `--version`, recognized an already-current upgrade, and uninstalled cleanly. The network integration test passed. CDLVSM main CI passed after Rust formatting.
+- CDLVSM `v0.9.1` was published. An isolated install fetched both public releases, installed Code, created `codelovesme-mike-desktop.desktop`, dispatched `--version`, recognized an already-current upgrade, and uninstalled cleanly. A second public CLI install started with Code 2.10 and upgraded it to 2.11 before installing Mike Desktop. The network integration test and CDLVSM main CI passed.
 - Using the actual installed release's genes and native modules, the live end-to-end runner signed into the real host, approved Mike's task and the exact local file, opened it, checked Mike's saved reply, and revoked the test device. The disposable auth account was removed afterward.

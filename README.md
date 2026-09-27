@@ -12,7 +12,8 @@ On Linux x86_64, with [CDLVSM](https://github.com/codelovesme/cdlvsm) installed:
     cdlvsm install mike-desktop
     cdlvsm mike-desktop
 
-The install also brings in the Code interpreter and adds **Mike Desktop** to
+CDLVSM 0.9.1 or newer is needed. The install also brings in Code 2.11 or newer
+(upgrading an older managed Code install) and adds **Mike Desktop** to
 the desktop applications menu. `cdlvsm upgrade mike-desktop` and
 `cdlvsm uninstall mike-desktop` manage later releases. The bundle has its
 own pinned Euglena modules and needs no source checkout or `euglena install`.
