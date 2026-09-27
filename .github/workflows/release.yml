@@ -41,8 +41,9 @@ jobs:
           set -euo pipefail
           if [ "${{ github.ref_type }}" = tag ]; then version="${{ github.ref_name }}"; else version=dev; fi
           mkdir -p "$RUNNER_TEMP/bare-home"
+          code_bin=$(command -v cdlvsm-code)
           set +e
-          HOME="$RUNNER_TEMP/bare-home" MIKE_DESKTOP_CODE_BIN="$HOME/.local/bin/cdlvsm-code" \
+          HOME="$RUNNER_TEMP/bare-home" MIKE_DESKTOP_CODE_BIN="$code_bin" \
             timeout 8s xvfb-run -a dist/mike-desktop-"$version"-x86_64-linux/mike-desktop
           result=$?
           set -e
