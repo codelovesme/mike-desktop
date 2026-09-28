@@ -72,6 +72,7 @@ class MikeWindow:
         self.active_task = ""
         self.task_dialog_open = False
         self.request_running = False
+        self.opening_file = False
         self.closed = False
         self.connect_state = ""
         self.inserting_token = False
@@ -291,7 +292,7 @@ class MikeWindow:
             method="GET" if body is None else "POST",
         )
         try:
-            with urlopen(request, timeout=18) as response:
+            with urlopen(request, timeout=160 if path == "/task/decide" else 18) as response:
                 return response.status, response.read(32768).decode()
         except Exception as error:
             if hasattr(error, "code"):
@@ -368,7 +369,9 @@ class MikeWindow:
                 state = json.loads(body)
             except ValueError:
                 return False
-            if state.get("connection") == "connected":
+            if self.opening_file:
+                pass
+            elif state.get("connection") == "connected":
                 self.set_status("Desktop connected")
             elif state.get("connection") == "revoked":
                 self.stack.set_visible_child_name("welcome")
@@ -452,7 +455,19 @@ class MikeWindow:
         approved = dialog.run() == Gtk.ResponseType.YES
         dialog.destroy()
         self.task_dialog_open = False
-        self.async_bridge("/task/decide", {"yes": approved}, lambda _status, _body: False)
+        if approved:
+            self.opening_file = True
+            self.set_status("Opening the reviewed file…")
+
+        def decided(status, _body):
+            self.opening_file = False
+            if status != 200:
+                self.set_status("The file was not opened. Check the desktop portal and try again.")
+            elif approved:
+                self.set_status("The reviewed file was handed to the desktop.")
+            return False
+
+        self.async_bridge("/task/decide", {"yes": approved}, decided)
 
     def decline_task(self) -> None:
         self.task_dialog_open = False

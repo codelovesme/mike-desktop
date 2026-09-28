@@ -19,8 +19,9 @@ cdlvsm mike
 
 The install includes the needed Code runtime and a **Mike** entry in the
 applications menu. This release also needs the distribution packages
-`python3-gi` and `gir1.2-webkit2-4.1` (WebKitGTK 4.1). Sign in with your
-existing Euglena account in the system browser when the window asks you to
+`python3-gi`, `gir1.2-webkit2-4.1`, `xdg-desktop-portal`, and
+`xdg-desktop-portal-gtk`. Sign in with your existing Euglena account in the
+system browser when the window asks you to
 connect. Mike transfers that approved session through a one-time local
 callback, then pairs the native companion. Its pairing credential stays in
 private local storage.
@@ -39,7 +40,9 @@ the website and choose this computer as the target for a local task.
 Local file access is off until a task arrives. After Mike's action approval,
 the desktop asks you to choose a folder with the OS picker and enter filename
 words. It searches only that folder (up to six levels), shows the exact match,
-and waits for a native Yes/No before opening it. Mike's model cannot supply a
+and waits for a native Yes/No before opening it. The desktop then opens the
+verified file descriptor through the document portal; a swapped symlink or
+missing portal causes the task to fail closed. Mike's model cannot supply a
 path or shell command to the desktop.
 
 The pairing survives restart in `~/.local/state/mike-desktop`, with a private
@@ -48,8 +51,7 @@ paired desktops have their own task inboxes, and the website can choose the
 default target. The desktop currently needs the app open to receive tasks.
 
 Google sign-in uses the same external browser connection route when the
-identity provider is configured. A file changed between the last scope check
-and the OS opener remains a race to harden before general release.
+identity provider is configured.
 
 ## Develop and verify
 
@@ -59,6 +61,7 @@ euglena build
 euglena test
 euglena format --check
 /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py'
+MIKE_TEST_PORTAL=1 dbus-run-session -- /usr/bin/python3 -m unittest discover -s tests -p test_portal_ipc.py
 ```
 
 The app uses pinned native modules and direct HTTPS requests to the public

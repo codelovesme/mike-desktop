@@ -51,6 +51,6 @@ emit Key { id = desktop.id, name = "y", text = "y" } to this
 emit Ran to proc get approved
 emit Length { value = approved.items } to core get approved_count
 assert approved_count.value = 5
-assert approved.items[4].command = "xdg-open"
-assert approved.items[4].args = ["/tmp/allowed/invoice.pdf"]
+assert approved.items[4].command = "/usr/bin/python3"
+assert approved.items[4].args = ["ui/secure_open.py", "/tmp/allowed", "/tmp/allowed/invoice.pdf"]
 emit CloseRequested { id = desktop.id } to this

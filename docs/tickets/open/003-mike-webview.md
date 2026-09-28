@@ -13,7 +13,8 @@
 - [x] The extracted bundle launches without a source checkout and connects to the public host (release-bundle GTK smoke and screenshot).
 - [ ] Exercise the actual browser connection and native folder/confirmation dialogs together on a clean supported desktop image.
 - [ ] Verify Google sign-in with a configured provider and record account-switch and offline screenshots.
-- [ ] Close the file replacement race between scope recheck and `xdg-open` before general release.
+- [x] The WebView file opener rejects symlink replacement and hands the verified descriptor to the document portal (`test_secure_open.py`, native fixture, live bridge test).
+- [ ] Exercise the live portal's final user response and exact file open on a supported GNOME desktop; automated tests currently replace that last OS effect.
 - [ ] Publish the release, verify `cdlvsm install mike` on clean Debian and Ubuntu desktops, commit, and push.
 
 See `docs/plans/003-mike-desktop-webview.md` for the full product and security design.

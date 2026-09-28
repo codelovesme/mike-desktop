@@ -2,7 +2,7 @@
 """Run Mike -> gateway -> native desktop -> approved file open against a live host.
 
 Provide E2E_EMAIL and E2E_PASSWORD for a disposable signed-in account.
-The opener is a private test executable; every other boundary is real.
+The final document-portal effect is recorded; every other boundary is real.
 """
 
 import json
@@ -143,20 +143,14 @@ def main():
             filename = "mike-test-invoice-" + secrets.token_hex(5) + ".txt"
             exact = root / filename
             exact.write_text("Mike desktop fixture\n")
-            bin_dir = area / "bin"
-            bin_dir.mkdir()
-            opener = bin_dir / "xdg-open"
-            opener.write_text('#!/bin/sh\nprintf "%s\\n" "$1" > "$MIKE_OPEN_LOG"\n')
-            opener.chmod(0o700)
             opened_log = area / "opened.txt"
             source = area / "desktop.code"
             source.write_text(fixture(EMAIL, PASSWORD, str(root), filename, str(exact), token))
             source.chmod(0o600)
             env = os.environ.copy()
-            env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
             env["MIKE_OPEN_LOG"] = str(opened_log)
             env["MIKE_DESKTOP_HOST_URL"] = HOST
-            result = subprocess.run([str(CODE), "run", str(source)], env=env,
+            result = subprocess.run([str(CODE), "run", str(source)], cwd=DESKTOP, env=env,
                                     capture_output=True, text=True, timeout=240)
             if result.returncode:
                 detail = (result.stderr + result.stdout).replace(PASSWORD, "<redacted>")

@@ -2,7 +2,7 @@
 """Live Mike turn through the WebView companion's authenticated local bridge.
 
 Use a disposable verified account. The real Mike and device gateway run behind
-EUGLENA_HOST_URL; only xdg-open is replaced with a recorder.
+EUGLENA_HOST_URL; only the final document-portal effect is recorded.
 """
 
 import json
@@ -67,18 +67,12 @@ def main():
         exact = chosen / filename
         exact.write_text("Mike desktop bridge fixture\n")
         opened = area / "opened"
-        bin_dir = area / "bin"
-        bin_dir.mkdir()
-        opener = bin_dir / "xdg-open"
-        opener.write_text('#!/bin/sh\nprintf "%s\\n" "$1" > "$MIKE_OPEN_LOG"\n')
-        opener.chmod(0o700)
         bridge_dir = area / "bridge"
         bridge_dir.mkdir(mode=0o700)
         secret = secrets.token_urlsafe(48)
         env = os.environ.copy()
         env.update(MIKE_DESKTOP_HOST_URL=HOST, MIKE_DESKTOP_BRIDGE_SECRET=secret,
-                   MIKE_DESKTOP_BRIDGE_DIR=str(bridge_dir), MIKE_OPEN_LOG=str(opened),
-                   PATH=str(bin_dir) + os.pathsep + env.get("PATH", ""))
+                   MIKE_DESKTOP_BRIDGE_DIR=str(bridge_dir), MIKE_OPEN_LOG=str(opened))
         process = subprocess.Popen([CODE, "run", "main.code"], cwd=ROOT, env=env,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:

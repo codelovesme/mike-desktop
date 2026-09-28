@@ -20,7 +20,7 @@ jobs:
       - name: Window dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends xvfb libxkbcommon0 libxkbcommon-x11-0 fonts-dejavu-core fontconfig python3-gi gir1.2-webkit2-4.1
+          sudo apt-get install -y --no-install-recommends xvfb libxkbcommon0 libxkbcommon-x11-0 fonts-dejavu-core fontconfig python3-gi gir1.2-webkit2-4.1 dbus-x11
       - name: Install Euglena and Code
         run: |
           curl -sSf https://raw.githubusercontent.com/codelovesme/cdlvsm/main/install.sh | sh
@@ -32,6 +32,7 @@ jobs:
           cdlvsm code build tests/support/process_mock.code --target shared -o tests/support/process_mock.so
           cdlvsm euglena test
           CODE_BIN="$(command -v cdlvsm-code)" /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py'
+          MIKE_TEST_PORTAL=1 dbus-run-session -- /usr/bin/python3 -m unittest discover -s tests -p 'test_portal_ipc.py'
           cdlvsm euglena format --check
           if [ "${{ github.ref_type }}" = tag ]; then version="${{ github.ref_name }}"; else version=dev; fi
           python3 tools/package.py "$version" dist

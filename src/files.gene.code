@@ -34,9 +34,11 @@ OpenLocalFile { path, root } =>
     emit FileInChosenFolder { path = path, root = root } to this get scope
     if not scope.ok
         return FileRefused { reason = "the file changed or left the chosen folder" }
-    emit Run { command = "xdg-open", args = [path] } to proc get opened
+    | Pass the verified descriptor to the document portal. A pathname swap
+    | after the review cannot redirect the file it receives.
+    emit Run { command = "/usr/bin/python3", args = ["ui/secure_open.py", root, path] } to proc get opened
     if opened ∈ Exception or not opened.success
-        return FileRefused { reason = "the desktop could not open the file" }
+        return FileRefused { reason = "the document portal could not open the reviewed file" }
     return FileOpened { path = path }
 
 | Recheck the chosen folder and exact candidate immediately before opening.
