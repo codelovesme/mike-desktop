@@ -1,117 +1,77 @@
-# Mike Desktop
+# Mike
 
-Mike Desktop is a native Linux Euglena window. Mike's conversation, planning,
-and memory stay in the server's mike-api. This app signs in as the person,
-pairs with mike-interface-api, sends typed questions to Mike, follows turns
-started in the browser, and collects local tasks addressed to this device.
+Mike is a native Linux interface to your Euglena account. His conversation,
+planning, and memory stay on the server. The desktop app signs you in, shows
+recent conversation, follows turns started on other devices, and lets you
+approve local actions. You can use Mike here without opening the website.
 
-## Install from the public release
+The source project and release asset are named `mike-desktop`; the installed
+application and window are named **Mike**.
 
-On Linux x86_64, with [CDLVSM](https://github.com/codelovesme/cdlvsm) installed:
+## Install
 
-    cdlvsm install mike-desktop
-    cdlvsm mike-desktop
+On Linux x86_64, install [CDLVSM](https://github.com/codelovesme/cdlvsm), then:
 
-CDLVSM 0.9.1 or newer is needed. The install also brings in Code 2.11 or newer
-(upgrading an older managed Code install) and adds **Mike Desktop** to
-the desktop applications menu. `cdlvsm upgrade mike-desktop` and
-`cdlvsm uninstall mike-desktop` manage later releases. The bundle has its
-own pinned Euglena modules and needs no source checkout or `euglena install`.
-It contains no account credential; sign in inside the window.
+```sh
+cdlvsm install mike
+cdlvsm mike
+```
 
-The launcher connects to `http://127.0.0.1:8899` by default. For a host on
-another machine, start an authenticated SSH tunnel to the host's loopback
-port, then launch with:
+The install includes the needed Code runtime and a **Mike** entry in the
+applications menu. Sign in with your existing Euglena account in the window.
+Mike connects to `https://apps.codeloves.me` over TLS; you do not need a
+checkout, server address, or SSH tunnel. `cdlvsm upgrade mike` and
+`cdlvsm uninstall mike` manage the installation. `mike-desktop` remains a
+legacy package name for existing installations.
 
-    ssh -N -L 127.0.0.1:18899:127.0.0.1:8899 user@euglena-server
+## Use
 
-In another terminal:
+Type a question and press Enter. Mike can use the server applications your
+account is allowed to use. Type `/help` for the desktop commands, `/apps`
+to see the applications available to your account, `/history`
+to refresh the most recent conversation, `/speak` to record a question, or
+`/read` to play Mike's latest reply. Connection state appears at the top.
 
-    MIKE_DESKTOP_HOST_URL=http://127.0.0.1:18899 cdlvsm mike-desktop
+Local file access is off until you choose a folder. Use `/folder` to choose
+one in advance, or wait until you approve a file task and Mike asks for it.
+Enter filename words; Mike searches only that folder (up to six levels),
+shows the exact match, and waits for your second confirmation before opening
+it. Escape or N declines. Mike's model cannot supply a path or shell command
+for the desktop to run.
 
-The launcher rejects a non-loopback URL.
+The pairing survives restart in `~/.local/state/mike-desktop`, with a private
+directory and credential files. The sign-in token stays in memory. Other
+paired desktops have their own task inboxes, and the website can choose the
+default target. The desktop currently needs the app open to receive tasks.
 
-The first local task is finding and opening a file. On each launch, the person
-chooses an absolute search folder. No folder is enabled by default. For a
-task, the person enters filename words; the app searches that folder (up to
-six levels), displays the exact first match, and waits for Y before asking
-xdg-open to open it. N declines. Mike also asks permission before he queues
-the task. The model's goal is shown to the person but is never used as a
-command, filename query, root, or path to open.
+## Develop and verify
 
-## Run
+```sh
+euglena install
+euglena build
+euglena test
+euglena format --check
+```
 
-On the Linux desktop:
+The app uses pinned native modules and direct HTTPS requests to the public
+host-web API. For local development, set
+`MIKE_DESKTOP_HOST_URL=http://127.0.0.1:8923` to use a local host-web server.
+The launcher accepts that loopback override and the public service only.
 
-    cd mike-desktop
-    cp .env.example .env
-    # Point the three URLs at the host's reachable address.
-    euglena install
-    euglena build
-    euglena run
+With a disposable verified account, run the full workflow against the public
+service:
 
-The default .env.example uses the local Euglena host on port 8899. The
-native net_client in Code 2.11 speaks HTTP only. On another computer, use
-an authenticated encrypted tunnel with local forwarding to the host and
-keep the URLs at 127.0.0.1; direct plain HTTP across a network is not a
-supported deployment. Desktop sign-in and device credential both travel
-through these connections.
+```sh
+EUGLENA_HOST_URL=https://apps.codeloves.me \
+  E2E_EMAIL=... E2E_PASSWORD=... python3 tools/live-e2e.py
+```
 
-For a remote Linux desktop, start tools/remote-tunnel.sh with the SSH login
-for the server. When running from source, set AUTH_URL, MIKE_URL, and
-MIKE_INTERFACE_URL in .env to http://127.0.0.1:18899/auth, /mike, and
-/mike-interface respectively. For an installed release, set
-MIKE_DESKTOP_HOST_URL=http://127.0.0.1:18899 instead.
-The SSH session must stay open while the desktop app is connected. The
-client's offline status appears when it stops.
+The runner drives a real Mike turn, approves it in a headless native window,
+chooses a temporary search folder, approves the exact match, and checks the
+file opener and saved reply. It revokes its temporary pairing. Set
+`E2E_DESKTOP_DIR` to an extracted bundle and `CODE_BIN` to Code to run the
+same check against a release.
 
-Enter the email, password, and search folder in the window. Enter a question
-to Mike in the same input line. Type /folder to change the search folder.
-Type /speak to record eight seconds from the system microphone and send the
-transcribed words to Mike. Type /read to play Mike's latest reply. These use
-arecord, base64, openssl, and aplay directly; an unavailable microphone or
-speaker is shown as a status in the window.
-The title line shows connected or offline state. While the app is open it
-heartbeats and checks its own task inbox every 2.5 seconds. Another connected
-desktop has its own inbox. The browser at /mike lists paired desktops and
-lets the person choose the default target.
-
-The pairing survives restart in ~/.local/state/mike-desktop, with a 0700
-directory and 0600 identity files. A sign-in token is held in memory only.
-If the saved pairing was revoked, the app pairs anew. If secure local storage
-cannot be prepared, it still works for that run and says that the pairing
-will not survive restart.
-
-## Verify
-
-    euglena test
-    euglena build
-    euglena format --check
-
-The native fixtures drive a headless window through the declined and
-approved paths, and inspect each process call. The file fixture checks that
-shell-looking text remains a single filename argument. The gateway's fixture
-checks owner and device isolation, duplicate claims, completion, and
-revocation. With a running host and a disposable signed-in account, run the
-full live workflow:
-
-    E2E_EMAIL=... E2E_PASSWORD=... python3 tools/live-e2e.py
-
-Set `E2E_DESKTOP_DIR` to an installed release's `current` directory and
-`CODE_BIN` to its Code interpreter to run the same check against the
-published bundle instead of the source tree.
-
-It starts a real Mike turn, approves Mike's request in a headless native
-window, claims the desktop task, enters a filename, approves the exact match,
-and verifies the single file opener call and Mike's saved reply. The file
-opener is a private test executable; the host, gateway, and desktop code are
-real. The runner revokes its temporary pairing after the test.
-
-The Linux interface supports typed and spoken input and reading replies.
-iOS, Android, and a packaged encrypted remote connection remain follow-on
-work. The browser already has microphone and voice chat support.
-
-The server's two new held apps include root-level mongodb.so symlinks into
-their lockfile-pinned 2.11 modules. Without them the Code compiler selects
-an older globally installed flat module, and Mike's conversation indexes
-silently fail at runtime. Run euglena install before rebuilding those apps.
+Linux x86_64 is the only packaged desktop platform today. Mobile apps,
+account creation in the desktop app, and a richer visual conversation are
+future work.

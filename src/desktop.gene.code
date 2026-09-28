@@ -22,16 +22,32 @@ active = true
 state_dir = ""
 state_ready = false
 reading_id = ""
+host_url = "https://apps.codeloves.me"
+recent_lines = []
+panel_lines = []
+panel_title = "RECENT CONVERSATION  ·  synced with Mike"
+
+| All requests go to the fixed Euglena service or an explicit local test
+| endpoint. Particle names and arguments remain typed; no model text becomes
+| a URL or executable command.
+ApiCall { app, particle } =>
+    if app ≠ "auth" and app ≠ "mike" and app ≠ "mike-interface"
+        return ApiUnavailable
+    emit Post { url = host_url + "/api/" + app, body = "$particle", content_type = "application/json", timeout_seconds = 12 } to http get response
+    if response ∈ Exception or not response.ok or response.status ≠ 200
+        return ApiUnavailable
+    emit Parse { text = response.body } to json get parsed
+    if parsed ∈ Exception or parsed.value._class ∉ String
+        return ApiUnavailable
+    return parsed.value
 
 StartDesktop { headless } =>
-    emit Get { name = "MIKE_DESKTOP_HOST_URL", default = "" } to system_env get host_url
-    if host_url ∉ Exception and host_url.value ∈ String and host_url.value ≠ ""
-        emit Config { url = host_url.value + "/auth" } to auth
-        emit Config { url = host_url.value + "/mike" } to mike
-        emit Config { url = host_url.value + "/mike-interface" } to interface
+    emit Get { name = "MIKE_DESKTOP_HOST_URL", default = "" } to system_env get config_url
+    if config_url ∉ Exception and config_url.value ∈ String and config_url.value ≠ ""
+        host_url = config_url.value
     if headless ≠ true
         emit PrepareStore to this
-    emit Open { title = "Mike Desktop", cols = 88, rows = 18, headless = headless } to win get opened
+    emit Open { title = "Mike", cols = 100, rows = 26, headless = headless } to win get opened
     if opened ∈ Exception
         return opened
     window_id = opened.id
@@ -83,33 +99,39 @@ SaveIdentity { owner, id, secret } =>
     return StoreReady
 
 DrawDesktop =>
+    connection_style = "status"
+    if connection = "offline" or connection = "Mike unavailable" or connection = "gateway unavailable"
+        connection_style = "status_warn"
     prompt = "Email"
     if mode = "password", prompt = "Password"
-    if mode = "root", prompt = "Folder to search (absolute path)"
-    if mode = "ready", prompt = "Ask Mike, or use /folder, /speak, /read"
+    if mode = "root", prompt = "Optional search folder (absolute path)"
+    if mode = "root_task", prompt = "Choose a folder for this file task (absolute path)"
+    if mode = "ready", prompt = "Ask Mike anything, or type /help"
     if mode = "query", prompt = "Filename words to search"
     if mode = "file_confirm", prompt = "Open this exact file? Press Y or N"
     if mode = "mike_confirm", prompt = "Allow Mike's task? Press Y or N"
     display = line
     if mode = "password", display = "(hidden)"
     rows = [
-        ["Mike Desktop  |  " + connection]
-        ["Signed in: " + email]
-        ["Search folder: " + root]
+        [{ text = " MIKE", width = 18, style = "menu", bold = true }, { text = "Your Euglena assistant", width = 56, style = "menu" }, { text = connection, width = 26, align = "right", style = connection_style }]
+        [{ text = " Account  ", style = "dim" }, { text = email, style = "plain" }]
+        [{ text = " Files     ", style = "dim" }, { text = root, style = "plain" }]
         [""]
-        ["Task: " + task_goal]
-        ["File: " + match_path]
+        [{ text = " Local task  ", style = "pane_title_focus" }, { text = task_goal, style = "plain" }]
+        [{ text = " File        ", style = "dim" }, { text = match_path, style = "plain" }]
         [""]
-        ["Mike: " + reply]
-        ["Status: " + message]
+        [{ text = " Mike  ", style = "selected_focus" }, { text = reply, style = "plain" }]
+        [{ text = " Status  ", style = "status" }, { text = message, style = "plain" }]
         [""]
-        [prompt + ":"]
-        ["> " + display]
+        [{ text = " " + prompt + ":", style = "prompt" }]
+        [{ text = " > " + display, width = 100, style = "selected_focus" }]
         [""]
-        ["Enter submits. /speak records 8 seconds. /read plays Mike's reply."]
-        ["Desktop tasks require Mike's approval and a second local approval."]
-        ["The desktop only searches the folder you selected."]
-    ]
+        [{ text = " /help  /apps  /history  /folder  /speak  /read", style = "dim" }]
+        [{ text = " Desktop tasks require your approval before a local action.", style = "dim" }]
+        [{ text = " Local files stay off until you choose a search folder.", style = "dim" }]
+        [""]
+        [{ text = " " + panel_title, width = 100, style = "pane_title_focus" }]
+    ] + panel_lines
     emit Draw { id = window_id, rows = rows } to win
     return DrawnDesktop
 
@@ -122,7 +144,7 @@ Key { id, name, text } =>
         if name = "n" or name = "N" or name = "escape"
             emit Decide { yes = false } to this
         return Noted
-    if name = "escape" and mode = "query"
+    if name = "escape" and (mode = "query" or mode = "root_task")
         emit FinishTask { outcome = "declined", detail = "the person cancelled the search" } to this
         return Noted
     if name = "enter"
@@ -154,7 +176,7 @@ SubmitLine =>
         password = value
         emit SignIn to this
         return Noted
-    if mode = "root"
+    if mode = "root" or mode = "root_task"
         emit SelectRoot { path = value } to this
         emit DrawDesktop to this
         return Noted
@@ -169,6 +191,18 @@ SubmitLine =>
         emit DrawDesktop to this
         return Noted
     if mode = "ready"
+        if value = "/help"
+            message = "Ask Mike to use your apps, remember things, or help plan. /apps lists your available apps."
+            emit DrawDesktop to this
+            return Noted
+        if value = "/apps"
+            emit ShowApps to this
+            emit DrawDesktop to this
+            return Noted
+        if value = "/history"
+            emit LoadRecentReply to this
+            emit DrawDesktop to this
+            return Noted
         if value = "/folder"
             mode = "root"
             emit DrawDesktop to this
@@ -197,7 +231,7 @@ SendQuestion { text } =>
         message = "Wait for Mike's current turn to finish."
         emit DrawDesktop to this
         return Noted
-    emit Send { particle = Impulse { token = token, particle = Ask { text = text } } } to mike get started
+    emit ApiCall { app = "mike", particle = Impulse { token = token, particle = Ask { text = text } } } to this get started
     if started ∈ Thinking
         turn_id = started.turn_id
         reply = "Thinking about: " + text
@@ -232,7 +266,7 @@ CaptureSpeech =>
         message = "Could not read the recording."
         emit DrawDesktop to this
         return Unavailable
-    emit Send { particle = Impulse { token = token, particle = Hear { audio_base64 = encoded.stdout, format = "wav" } } } to mike get heard
+    emit ApiCall { app = "mike", particle = Impulse { token = token, particle = Hear { audio_base64 = encoded.stdout, format = "wav" } } } to this get heard
     emit Run { command = "unlink", args = [path] } to proc
     if heard ∈ Heard and heard.text ∈ String and heard.text ≠ ""
         message = "Heard: " + heard.text
@@ -247,7 +281,7 @@ ReadReply =>
         message = "There is no reply to read aloud."
         emit DrawDesktop to this
         return Refused
-    emit Send { particle = Impulse { token = token, particle = Read { text = reply } } } to mike get speaking
+    emit ApiCall { app = "mike", particle = Impulse { token = token, particle = Read { text = reply } } } to this get speaking
     if speaking ∈ Speaking
         reading_id = speaking.reading_id
         message = "Mike is preparing speech."
@@ -276,11 +310,14 @@ SelectRoot { path } =>
         return RootRefused
     root = path
     mode = "ready"
-    message = "Folder selected. Ask Mike to find and open a file."
+    message = "Folder selected. Mike can now search it when you approve a file task."
+    if task_id ≠ ""
+        mode = "query"
+        message = "Enter filename words to search this folder, or Escape to decline."
     return RootSelected
 
 SignIn =>
-    emit Send { particle = Open { particle = Authenticate { email = email, password = password } } } to auth get signed
+    emit ApiCall { app = "auth", particle = Open { particle = Authenticate { email = email, password = password } } } to this get signed
     password = ""
     if signed ∉ SignedIn
         connection = "sign in failed"
@@ -291,17 +328,17 @@ SignIn =>
     token = signed.token
     emit LoadIdentity { owner = email } to this get saved
     if saved ∈ SavedIdentity
-        emit Send { particle = Impulse { token = token, particle = Heartbeat { device_id = saved.device_id, credential = saved.credential, capabilities = ["file_search", "file_open"] } } } to interface get reused
+        emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = Heartbeat { device_id = saved.device_id, credential = saved.credential, capabilities = ["file_search", "file_open"] } } } to this get reused
         if reused ∈ DeviceOnline
             device_id = saved.device_id
             credential = saved.credential
             connection = "connected"
-            mode = "root"
-            message = "Choose the folder Mike may search on this desktop."
+            mode = "ready"
+            message = "Ask Mike anything. Type /help for desktop options."
             emit LoadRecentReply to this
             emit DrawDesktop to this
             return SignedInDesktop
-    emit Send { particle = Impulse { token = token, particle = PairDevice { name = "Mike Desktop", platform = "linux" } } } to interface get paired
+    emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = PairDevice { name = "Mike Desktop", platform = "linux" } } } to this get paired
     if paired ∉ DevicePaired
         connection = "gateway unavailable"
         mode = "password"
@@ -311,12 +348,12 @@ SignIn =>
     device_id = paired.device_id
     credential = paired.credential
     emit SaveIdentity { owner = email, id = device_id, secret = credential } to this get stored
-    emit Send { particle = Impulse { token = token, particle = SetDefaultDevice { device_id = device_id } } } to interface
-    emit Send { particle = Impulse { token = token, particle = Heartbeat { device_id = device_id, credential = credential, capabilities = ["file_search", "file_open"] } } } to interface get first_pulse
+    emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = SetDefaultDevice { device_id = device_id } } } to this
+    emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = Heartbeat { device_id = device_id, credential = credential, capabilities = ["file_search", "file_open"] } } } to this get first_pulse
     connection = "offline"
     if first_pulse ∈ DeviceOnline, connection = "connected"
-    mode = "root"
-    message = "Choose the folder Mike may search on this desktop."
+    mode = "ready"
+    message = "Ask Mike anything. Type /help for desktop options."
     if stored ∉ StoreReady
         message = "Connected, but this desktop could not securely save its pairing; sign in again next launch."
     emit LoadRecentReply to this
@@ -324,10 +361,39 @@ SignIn =>
     return SignedInDesktop
 
 LoadRecentReply =>
-    emit Send { particle = Impulse { token = token, particle = RecentConversation { limit = 1 } } } to mike get recent
+    emit ApiCall { app = "mike", particle = Impulse { token = token, particle = RecentConversation { limit = 2 } } } to this get recent
     if recent ∈ Recent and recent.ok and recent.turns ≠ []
-        reply = recent.turns[0].reply
+        recent_lines = []
+        index = 0
+        emit Length { value = recent.turns } to core get count
+        loop
+            if index ≥ count.value
+                break
+            one = recent.turns[index]
+            recent_lines += [["You: " + one.text], ["Mike: " + one.reply], [""]]
+            index += 1
+        reply = recent.turns[count.value - 1].reply
+    panel_title = "RECENT CONVERSATION  ·  synced with Mike"
+    panel_lines = recent_lines
     return RecentLoaded
+
+ShowApps =>
+    emit ApiCall { app = "mike", particle = Impulse { token = token, particle = Catalogue } } to this get catalogue
+    if catalogue ∉ Catalogue
+        message = "Could not load your app list. Try again when connected."
+        return Unavailable
+    panel_title = "YOUR APPS  ·  ask Mike to use one"
+    panel_lines = []
+    count = 0
+    loop one over catalogue.apps
+        if count ≥ 7
+            break
+        panel_lines += [[one.app + "  ·  " + one.summary]]
+        count += 1
+    if count = 0
+        panel_lines = [["No apps are currently available to this account."]]
+    message = "Showing apps your account can ask Mike to use."
+    return AppsShown
 
 DesktopTick =>
     if not active
@@ -340,30 +406,30 @@ RefreshDesktop =>
     if not active
         return Stopped
     if token ≠ "" and credential ≠ ""
-        emit Send { particle = Impulse { token = token, particle = Heartbeat { device_id = device_id, credential = credential, capabilities = ["file_search", "file_open"] } } } to interface get pulse
+        emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = Heartbeat { device_id = device_id, credential = credential, capabilities = ["file_search", "file_open"] } } } to this get pulse
         if pulse ∈ DeviceOnline
             connection = "connected"
             if task_id = ""
-                emit Send { particle = Impulse { token = token, particle = ClaimTask { device_id = device_id, credential = credential } } } to interface get task
+                emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = ClaimTask { device_id = device_id, credential = credential } } } to this get task
                 if task ∈ InterfaceTask
                     emit ReceiveTask { task = task } to this
         if pulse ∉ DeviceOnline
             connection = "offline"
         if turn_id = "" and mode = "ready"
-            emit Send { particle = Impulse { token = token, particle = ActiveTurns } } to mike get active_turns
+            emit ApiCall { app = "mike", particle = Impulse { token = token, particle = ActiveTurns } } to this get active_turns
             if active_turns ∈ ActiveTurns and active_turns.items ≠ []
                 emit Length { value = active_turns.items } to core get active_count
                 latest = active_turns.items[active_count.value - 1]
                 turn_id = latest.turn_id
                 reply = "Following: " + latest.text
         if turn_id ≠ ""
-            emit Send { particle = Impulse { token = token, particle = Progress { turn_id = turn_id } } } to mike get progress
+            emit ApiCall { app = "mike", particle = Impulse { token = token, particle = Progress { turn_id = turn_id } } } to this get progress
             if progress ∈ Turn
                 emit ObserveTurn { turn = progress } to this
             if progress ∈ Exception
                 connection = "Mike unavailable"
         if reading_id ≠ ""
-            emit Send { particle = Impulse { token = token, particle = Spoken { reading_id = reading_id } } } to mike get speech
+            emit ApiCall { app = "mike", particle = Impulse { token = token, particle = Spoken { reading_id = reading_id } } } to this get speech
             if speech ∈ Speech and speech.stage = "ready"
                 reading_id = ""
                 emit PlaySpeech { audio_base64 = speech.audio_base64, format = speech.format } to this get played
@@ -388,6 +454,7 @@ ObserveTurn { turn } =>
         turn_id = ""
         pending = null
         if mode = "mike_confirm", mode = "ready"
+        emit LoadRecentReply to this
     if turn.stage = "failed"
         reply = turn.reply
         turn_id = ""
@@ -400,14 +467,18 @@ ReceiveTask { task } =>
     task_goal = task.goal
     match_path = ""
     mode = "query"
+    if root = ""
+        mode = "root_task"
     line = ""
-    message = "This desktop can find and open a file. Enter filename words, or Escape to decline Mike's request."
+    message = "Enter filename words, or Escape to decline Mike's request."
+    if root = ""
+        message = "Choose a folder Mike may search for this task, or Escape to decline."
     emit DrawDesktop to this
     return TaskShown
 
 Decide { yes } =>
     if mode = "mike_confirm"
-        emit Send { particle = Impulse { token = token, particle = Confirm { turn_id = turn_id, yes = yes } } } to mike
+        emit ApiCall { app = "mike", particle = Impulse { token = token, particle = Confirm { turn_id = turn_id, yes = yes } } } to this
         pending = null
         mode = "ready"
         message = "Decision sent to Mike."
@@ -431,7 +502,7 @@ FinishTask { outcome, detail } =>
         match_path = ""
         mode = "ready"
         return TaskFinished
-    emit Send { particle = Impulse { token = token, particle = CompleteTask { device_id = device_id, credential = credential, id = task_id, outcome = outcome, detail = detail } } } to interface get completed
+    emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = CompleteTask { device_id = device_id, credential = credential, id = task_id, outcome = outcome, detail = detail } } } to this get completed
     if completed ∈ TaskCompleted
         message = "Desktop task: " + outcome
     if completed ∉ TaskCompleted

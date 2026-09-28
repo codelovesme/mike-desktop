@@ -2,10 +2,9 @@
 | The process boundary is mocked so the fixture can inspect every OS effect.
 
 link "support/process_mock.so" as proc
-link "../.code/modules/net_client/2.11.0/net_client-linux-x86_64.so" as auth
-link "../.code/modules/net_client/2.11.0/net_client-linux-x86_64.so" as mike
-link "../.code/modules/net_client/2.11.0/net_client-linux-x86_64.so" as interface
 link "../.code/modules/env/2.11.0/env-linux-x86_64.so" as system_env
+link "../.code/modules/http_client/2.12.1/http_client-linux-x86_64.so" as http
+link "../.code/modules/json/2.12.1/json-linux-x86_64.so" as json
 link "../.code/modules/strings/2.11.0/strings-linux-x86_64.so" as strs
 link "../.code/modules/timer/2.11.0/timer-linux-x86_64.so" as clock
 link "../.code/modules/window/2.11.0/window-linux-x86_64.so" as win
@@ -14,6 +13,11 @@ link "../src/desktop.gene.code"
 
 emit StartDesktop { headless = true } to this get desktop
 assert desktop ∈ DesktopStarted
+emit ReceiveTask { task = InterfaceTask { id = "needs-folder", goal = "find a local file" } } to this
+emit Text { id = desktop.id } to win get needs_folder
+emit Contains { text = needs_folder.rows[10], needle = "Choose a folder" } to this get folder_prompt
+assert folder_prompt.yes
+emit Key { id = desktop.id, name = "escape", text = "" } to this
 emit SelectRoot { path = "/tmp/allowed" } to this get chosen
 assert chosen ∈ RootSelected
 
@@ -22,7 +26,7 @@ emit Say { stdout = "/tmp/allowed/invoice.pdf\n" } to proc
 emit Key { id = desktop.id, name = "i", text = "invoice" } to this
 emit Key { id = desktop.id, name = "enter", text = "" } to this
 emit Text { id = desktop.id } to win get review
-emit Contains { text = review.rows[5], needle = "File: /tmp/allowed/invoice.pdf" } to this get file_visible
+emit Contains { text = review.rows[5], needle = "/tmp/allowed/invoice.pdf" } to this get file_visible
 assert file_visible.yes
 emit Ran to proc get before
 assert before.items[0].command = "find"

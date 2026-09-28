@@ -28,10 +28,11 @@ def main():
         shutil.copy2(root / entry, stage / entry)
     shutil.copytree(root / "src", stage / "src")
     shutil.copy2(root / "bin/mike-desktop", stage / "mike-desktop")
+    shutil.copy2(root / "bin/mike-desktop", stage / "mike")
     (stage / "VERSION").write_text(version + "\n")
     (stage / "app.info").write_text(
-        "name=Mike Desktop\n"
-        "comment=Talk to Mike and approve local desktop tasks\n"
+        "name=Mike\n"
+        "comment=Your assistant and desktop interface to Euglena\n"
         "terminal=false\n"
         "icon=computer\n"
         "categories=Utility;\n"

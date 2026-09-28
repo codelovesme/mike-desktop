@@ -1,4 +1,6 @@
 | The only OS effects are fixed programs with separate arguments. A goal
+link "../.code/modules/http_client/2.12.1/http_client-linux-x86_64.so" as http
+link "../.code/modules/json/2.12.1/json-linux-x86_64.so" as json
 | cannot become an executable or a path. The UI calls OpenLocalFile only after
 | the exact match is shown and accepted.
 

@@ -1,10 +1,9 @@
 | Native speech playback keeps base64 data on stdin and calls fixed programs.
 | Unsupported formats never reach a player.
 
-link "../.code/modules/net_client/2.11.0/net_client-linux-x86_64.so" as auth
-link "../.code/modules/net_client/2.11.0/net_client-linux-x86_64.so" as mike
-link "../.code/modules/net_client/2.11.0/net_client-linux-x86_64.so" as interface
 link "../.code/modules/env/2.11.0/env-linux-x86_64.so" as system_env
+link "../.code/modules/http_client/2.12.1/http_client-linux-x86_64.so" as http
+link "../.code/modules/json/2.12.1/json-linux-x86_64.so" as json
 link "support/process_mock.so" as proc
 link "../.code/modules/strings/2.11.0/strings-linux-x86_64.so" as strs
 link "../.code/modules/timer/2.11.0/timer-linux-x86_64.so" as clock

@@ -16,8 +16,8 @@ from urllib.request import Request, urlopen
 
 
 DESKTOP = Path(os.environ.get("E2E_DESKTOP_DIR", str(Path(__file__).resolve().parents[1])))
-CODE = Path(os.environ.get("CODE_BIN", str(DESKTOP.parents[1] / "code/target/debug/code")))
-HOST = os.environ.get("EUGLENA_HOST_URL", "http://127.0.0.1:8899").rstrip("/")
+CODE = Path(os.environ.get("CODE_BIN", str(DESKTOP.parent / "code/target/debug/code")))
+HOST = os.environ.get("EUGLENA_HOST_URL", "http://127.0.0.1:8923").rstrip("/")
 EMAIL = os.environ.get("E2E_EMAIL", "")
 PASSWORD = os.environ.get("E2E_PASSWORD", "")
 
@@ -31,7 +31,7 @@ def request(app, particle, token=None):
     if token:
         envelope = {"_class": "Impulse", "token": token, "particle": particle}
     body = json.dumps(envelope).encode()
-    req = Request(HOST + "/" + app, body, {"Content-Type": "application/json"})
+    req = Request(HOST + "/api/" + app, body, {"Content-Type": "application/json", "User-Agent": "Mike-E2E/0.2"})
     with urlopen(req, timeout=25) as response:
         return json.load(response)
 
@@ -40,13 +40,15 @@ def module(name):
     bundled = DESKTOP / (name + ".so")
     if bundled.is_file():
         return str(bundled)
-    return str(DESKTOP / ".code/modules" / name / "2.11.0" / (name + "-linux-x86_64.so"))
+    lock = json.loads((DESKTOP / ".code/lock.json").read_text())
+    version = lock["modules"][name]["version"]
+    return str(DESKTOP / ".code/modules" / name / version / (name + "-linux-x86_64.so"))
 
 
 def fixture(email, password, root, filename, exact_path, token):
     lines = []
-    for alias in ("auth", "mike", "interface"):
-        lines.append('link ' + code_string(module("net_client")) + " as " + alias)
+    for name in ("http_client", "json"):
+        lines.append('link ' + code_string(module(name)) + " as " + ("http" if name == "http_client" else "json"))
     for name, alias in (("process", "proc"), ("strings", "strs"),
                         ("timer", "clock"), ("window", "win"), ("env", "system_env")):
         lines.append('link ' + code_string(module(name)) + " as " + alias)
@@ -54,9 +56,6 @@ def fixture(email, password, root, filename, exact_path, token):
         'link ' + code_string(str(DESKTOP / "src/files.gene.code")),
         'link ' + code_string(str(DESKTOP / "src/desktop.gene.code")),
     ])
-    for alias, app in (("auth", "auth"), ("mike", "mike"),
-                       ("interface", "mike-interface")):
-        lines.append("emit Config { url = " + code_string(HOST + "/" + app) + " } to " + alias)
     lines.extend([
         "emit StartDesktop { headless = true } to this get desktop",
         "assert desktop ∈ DesktopStarted",
@@ -70,7 +69,12 @@ def fixture(email, password, root, filename, exact_path, token):
 
     enter(email)
     enter(password)
-    enter(root)
+    enter("/apps")
+    lines.extend([
+        "emit Text { id = desktop.id } to win get catalogue_view",
+        'emit Contains { text = catalogue_view.rows[17], needle = "YOUR APPS" } to this get apps_visible',
+        "assert apps_visible.yes",
+    ])
     lines.append("emit RefreshDesktop to this")
     enter("Please use this connected desktop to find and open the local file named " + filename + ".")
 
@@ -90,6 +94,8 @@ def fixture(email, password, root, filename, exact_path, token):
 
     wait_for(10, "Allow Mike's task?", 90)
     lines.append('emit Key { id = desktop.id, name = "y", text = "y" } to this')
+    wait_for(10, "Choose a folder for this file task", 40)
+    enter(root)
     wait_for(10, "Filename words to search", 40)
     enter(filename)
     lines.extend([
@@ -101,8 +107,8 @@ def fixture(email, password, root, filename, exact_path, token):
     wait_for(8, "Desktop task: opened", 15)
     wait_for(7, "opened", 90)
     lines.extend([
-        "emit Send { particle = Impulse { token = " + code_string(token)
-        + ", particle = RecentConversation { limit = 1 } } } to mike get recent",
+        "emit ApiCall { app = \"mike\", particle = Impulse { token = " + code_string(token)
+        + ", particle = RecentConversation { limit = 1 } } } to this get recent",
         "assert recent ∈ Recent",
         "assert recent.ok",
         "assert recent.turns ≠ []",
@@ -120,8 +126,8 @@ def main():
     if not EMAIL or not PASSWORD:
         raise SystemExit("Set E2E_EMAIL and E2E_PASSWORD for a disposable account.")
     target = urlsplit(HOST)
-    if target.scheme != "http" or target.hostname not in ("127.0.0.1", "localhost", "::1"):
-        raise SystemExit("Use the local host or an encrypted tunnel bound to loopback.")
+    if not (target.scheme == "https" or target.scheme == "http" and target.hostname in ("127.0.0.1", "localhost", "::1")):
+        raise SystemExit("Use public HTTPS or HTTP on loopback.")
     signed = request("auth", {"_class": "Authenticate", "email": EMAIL, "password": PASSWORD})
     if signed.get("_class") != "SignedIn":
         raise SystemExit("The disposable account could not sign in.")
@@ -149,6 +155,7 @@ def main():
             env = os.environ.copy()
             env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
             env["MIKE_OPEN_LOG"] = str(opened_log)
+            env["MIKE_DESKTOP_HOST_URL"] = HOST
             result = subprocess.run([str(CODE), "run", str(source)], env=env,
                                     capture_output=True, text=True, timeout=240)
             if result.returncode:
