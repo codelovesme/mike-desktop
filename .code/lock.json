@@ -41,19 +41,6 @@
       ],
       "global": false
     },
-    "net_client": {
-      "name": "net_client",
-      "version": "2.11.0",
-      "source": "https://github.com/codelovesme/code/releases/tag/v2.11.0",
-      "asset": "net_client-linux-x86_64.so",
-      "sha256": "45ff72359e9a78d318d3ba8c0ca093af9889a2ae353a33152b8da944b75bd78a",
-      "handlers": [
-        "Config",
-        "Send"
-      ],
-      "setup": "Config",
-      "global": false
-    },
     "process": {
       "name": "process",
       "version": "2.12.1",
