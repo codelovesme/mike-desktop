@@ -26,6 +26,7 @@ def main():
     stage.mkdir()
     for entry in ("main.code", "README.md"):
         shutil.copy2(root / entry, stage / entry)
+    shutil.copytree(root / "ui", stage / "ui", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copytree(root / "src", stage / "src")
     shutil.copy2(root / "bin/mike-desktop", stage / "mike-desktop")
     shutil.copy2(root / "bin/mike-desktop", stage / "mike")

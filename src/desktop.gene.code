@@ -23,6 +23,8 @@ state_dir = ""
 state_ready = false
 reading_id = ""
 host_url = "https://apps.codeloves.me"
+bridge_secret = ""
+bridge_dir = ""
 recent_lines = []
 panel_lines = []
 panel_title = "RECENT CONVERSATION  ·  synced with Mike"
@@ -45,6 +47,27 @@ StartDesktop { headless } =>
     emit Get { name = "MIKE_DESKTOP_HOST_URL", default = "" } to system_env get config_url
     if config_url ∉ Exception and config_url.value ∈ String and config_url.value ≠ ""
         host_url = config_url.value
+    emit Get { name = "MIKE_DESKTOP_BRIDGE_SECRET", default = "" } to system_env get bridge_key
+    if bridge_key ∉ Exception and bridge_key.value ∈ String
+        bridge_secret = bridge_key.value
+    if bridge_secret ≠ ""
+        emit Get { name = "MIKE_DESKTOP_BRIDGE_DIR", default = "" } to system_env get location
+        if location ∈ Exception or location.value ∉ String or location.value = ""
+            return BridgeUnavailable
+        bridge_dir = location.value
+        emit PrepareStore to this
+        emit Config { host = "127.0.0.1", port = 0, max_body_bytes = 4096 } to bridge get configured
+        if configured ∈ Exception or not configured.ok
+            return BridgeUnavailable
+        emit Listen {} to bridge get listening
+        if listening ∈ Exception or not listening.ok
+            return BridgeUnavailable
+        emit Run { command = "install", args = ["-m", "600", "/dev/stdin", bridge_dir + "/port"], stdin = "" + listening.port } to proc get published
+        if published ∈ Exception or not published.success
+            emit Stop {} to bridge
+            return BridgeUnavailable
+        connection = "sign in"
+        return DesktopStarted { id = "bridge" }
     if headless ≠ true
         emit PrepareStore to this
     emit Open { title = "Mike", cols = 100, rows = 26, headless = headless } to win get opened
@@ -99,6 +122,8 @@ SaveIdentity { owner, id, secret } =>
     return StoreReady
 
 DrawDesktop =>
+    if bridge_secret ≠ ""
+        return DrawnDesktop
     connection_style = "status"
     if connection = "offline" or connection = "Mike unavailable" or connection = "gateway unavailable"
         connection_style = "status_warn"
@@ -326,6 +351,10 @@ SignIn =>
         emit DrawDesktop to this
         return Noted
     token = signed.token
+    emit ConnectAccount to this get connected
+    return connected
+
+ConnectAccount =>
     emit LoadIdentity { owner = email } to this get saved
     if saved ∈ SavedIdentity
         emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = Heartbeat { device_id = saved.device_id, credential = saved.credential, capabilities = ["file_search", "file_open"] } } } to this get reused
@@ -359,6 +388,79 @@ SignIn =>
     emit LoadRecentReply to this
     emit DrawDesktop to this
     return SignedInDesktop
+
+| The WebView sidecar is the only local caller. The bridge accepts a session
+| from its isolated first-party page and narrow task decisions. A task's goal
+| is never interpreted as a command, URL, or path.
+Request { method, path, body, headers } =>
+    if bridge_secret = "" or headers.authorization ≠ "Bearer " + bridge_secret
+        return Response { status = 403, body = "forbidden" }
+    if method = "GET" and path = "/state"
+        state = { connection = connection, mode = mode, owner = email, task_id = task_id, goal = task_goal, file = match_path, message = message }
+        emit Stringify { value = state } to json get encoded
+        return Response { status = 200, body = encoded.value, content_type = "application/json" }
+    if method ≠ "POST"
+        return Response { status = 405, body = "method not allowed" }
+    emit Parse { text = body } to json get parsed
+    if parsed ∈ Exception or parsed.value ∉ Object
+        return Response { status = 400, body = "bad request" }
+    request = parsed.value
+    if path = "/session"
+        if request.token ∉ String or request.token = ""
+            return Response { status = 400, body = "token required" }
+        emit ApiCall { app = "auth", particle = Impulse { token = request.token, particle = Me } } to this get account
+        if account ∉ Account or not account.active or not account.verified
+            return Response { status = 401, body = "session refused" }
+        if token = request.token and email = account.email and credential ≠ ""
+            return Response { status = 200, body = "connected" }
+        if task_id ≠ ""
+            emit FinishTask { outcome = "declined", detail = "desktop account changed" } to this
+        token = request.token
+        email = account.email
+        credential = ""
+        device_id = ""
+        root = ""
+        emit ConnectAccount to this get connected
+        if connected ∈ SignedInDesktop
+            return Response { status = 200, body = "connected" }
+        return Response { status = 503, body = "gateway unavailable" }
+    if path = "/disconnect"
+        if task_id ≠ ""
+            emit FinishTask { outcome = "declined", detail = "desktop disconnected" } to this
+        token = ""
+        credential = ""
+        device_id = ""
+        email = ""
+        root = ""
+        mode = "email"
+        connection = "sign in"
+        return Response { status = 200, body = "disconnected" }
+    if token = "" or credential = ""
+        return Response { status = 401, body = "sign in first" }
+    if path = "/task/search"
+        if task_id = "" or request.folder ∉ String or request.query ∉ String
+            return Response { status = 409, body = "no task or search" }
+        emit SelectRoot { path = request.folder } to this get selected
+        if selected ∉ RootSelected
+            return Response { status = 400, body = "invalid folder" }
+        emit FindLocalFile { root = root, query = request.query } to this get found
+        if found ∈ FileFound
+            match_path = found.path
+            mode = "file_confirm"
+            message = "Review the exact file before opening it."
+            return Response { status = 200, body = "found" }
+        return Response { status = 404, body = found.reason }
+    if path = "/task/decide"
+        if mode ≠ "file_confirm" or task_id = "" or request.yes ∉ Boolean
+            return Response { status = 409, body = "no file to review" }
+        emit Decide { yes = request.yes } to this
+        return Response { status = 200, body = "decision recorded" }
+    if path = "/task/decline"
+        if task_id = ""
+            return Response { status = 409, body = "no task" }
+        emit FinishTask { outcome = "declined", detail = "the person declined the task" } to this
+        return Response { status = 200, body = "declined" }
+    return Response { status = 404, body = "unknown route" }
 
 LoadRecentReply =>
     emit ApiCall { app = "mike", particle = Impulse { token = token, particle = RecentConversation { limit = 2 } } } to this get recent
@@ -415,6 +517,14 @@ RefreshDesktop =>
                     emit ReceiveTask { task = task } to this
         if pulse ∉ DeviceOnline
             connection = "offline"
+            if pulse ∈ Forbidden
+                connection = "revoked"
+                credential = ""
+                device_id = ""
+                task_id = ""
+                match_path = ""
+                mode = "ready"
+                message = "This desktop's access was revoked. Connect it again to resume local tasks."
         if turn_id = "" and mode = "ready"
             emit ApiCall { app = "mike", particle = Impulse { token = token, particle = ActiveTurns } } to this get active_turns
             if active_turns ∈ ActiveTurns and active_turns.items ≠ []
@@ -466,6 +576,7 @@ ReceiveTask { task } =>
     task_id = task.id
     task_goal = task.goal
     match_path = ""
+    if bridge_secret ≠ "", root = ""
     mode = "query"
     if root = ""
         mode = "root_task"
@@ -484,7 +595,7 @@ Decide { yes } =>
         message = "Decision sent to Mike."
     if mode = "file_confirm"
         if yes
-            emit OpenLocalFile { path = match_path } to this get opened
+            emit OpenLocalFile { path = match_path, root = root } to this get opened
             if opened ∈ FileOpened
                 emit FinishTask { outcome = "opened", detail = opened.path } to this
             if opened ∈ FileRefused

@@ -20,7 +20,7 @@ jobs:
       - name: Window dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends xvfb libxkbcommon0 libxkbcommon-x11-0 fonts-dejavu-core fontconfig
+          sudo apt-get install -y --no-install-recommends xvfb libxkbcommon0 libxkbcommon-x11-0 fonts-dejavu-core fontconfig python3-gi gir1.2-webkit2-4.1
       - name: Install Euglena and Code
         run: |
           curl -sSf https://raw.githubusercontent.com/codelovesme/cdlvsm/main/install.sh | sh
@@ -31,6 +31,7 @@ jobs:
           cdlvsm euglena install
           cdlvsm code build tests/support/process_mock.code --target shared -o tests/support/process_mock.so
           cdlvsm euglena test
+          CODE_BIN="$(command -v cdlvsm-code)" /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py'
           cdlvsm euglena format --check
           if [ "${{ github.ref_type }}" = tag ]; then version="${{ github.ref_name }}"; else version=dev; fi
           python3 tools/package.py "$version" dist
@@ -42,7 +43,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bare-home"
           code_bin=$(command -v cdlvsm-code)
           set +e
-          HOME="$RUNNER_TEMP/bare-home" MIKE_DESKTOP_CODE_BIN="$code_bin" \
+          HOME="$RUNNER_TEMP/bare-home" GDK_BACKEND=x11 MIKE_DESKTOP_CODE_BIN="$code_bin" \
             timeout 8s xvfb-run -a dist/mike-desktop-"$version"-x86_64-linux/mike
           result=$?
           set -e
@@ -55,4 +56,7 @@ jobs:
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/*.tar.gz --title "Mike ${{ github.ref_name }}" --generate-notes
+        run: |
+          flags=()
+          if [[ "${{ github.ref_name }}" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "${{ github.ref_name }}" dist/*.tar.gz --title "Mike ${{ github.ref_name }}" --generate-notes "${flags[@]}"

@@ -35,4 +35,13 @@ fi
     exit 1
 }
 cd "$here"
-exec "$interpreter" run main.code
+if [ "${MIKE_DESKTOP_TEXT_UI:-}" = 1 ]; then
+    exec "$interpreter" run main.code
+fi
+MIKE_DESKTOP_CODE_BIN=$interpreter
+export MIKE_DESKTOP_CODE_BIN
+if [ -x /usr/bin/python3 ]; then
+    exec /usr/bin/python3 "$here/ui/desktop_webview.py"
+fi
+echo 'mike: Python 3 and WebKitGTK are needed for the desktop window' >&2
+exit 1

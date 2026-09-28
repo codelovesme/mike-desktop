@@ -3,6 +3,7 @@
 
 link "../.code/modules/env/2.11.0/env-linux-x86_64.so" as system_env
 link "../.code/modules/http_client/2.12.1/http_client-linux-x86_64.so" as http
+link "../.code/modules/http_server/2.12.1/http_server-linux-x86_64.so" as bridge
 link "../.code/modules/json/2.12.1/json-linux-x86_64.so" as json
 link "support/process_mock.so" as proc
 link "../.code/modules/strings/2.11.0/strings-linux-x86_64.so" as strs

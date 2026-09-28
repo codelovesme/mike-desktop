@@ -28,13 +28,48 @@ FindLocalFile { root, query } =>
 
 | This handler is called only after a fresh local confirmation of the exact
 | path. It does not accept a server-supplied path.
-OpenLocalFile { path } =>
+OpenLocalFile { path, root } =>
     if path ∉ String or path = ""
         return FileRefused { reason = "no file was selected" }
+    emit FileInChosenFolder { path = path, root = root } to this get scope
+    if not scope.ok
+        return FileRefused { reason = "the file changed or left the chosen folder" }
     emit Run { command = "xdg-open", args = [path] } to proc get opened
     if opened ∈ Exception or not opened.success
         return FileRefused { reason = "the desktop could not open the file" }
     return FileOpened { path = path }
+
+| Recheck the chosen folder and exact candidate immediately before opening.
+| `find -P` avoids following links while searching; this check also rejects a
+| file whose resolved target lies outside the chosen folder.
+FileInChosenFolder { path, root } =>
+    if root ∉ String or root = "" or path ∉ String or path = ""
+        return Scope { ok = false }
+    emit Run { command = "realpath", args = ["-e", "--", root] } to proc get selected
+    emit Run { command = "realpath", args = ["-e", "--", path] } to proc get actual
+    if selected ∈ Exception or actual ∈ Exception or not selected.success or not actual.success
+        return Scope { ok = false }
+    emit Length { value = selected.stdout } to core get folder_size
+    emit Length { value = actual.stdout } to core get file_size
+    if folder_size.value < 2 or file_size.value < 3
+        return Scope { ok = false }
+    if selected.stdout[folder_size.value - 1, folder_size.value) ≠ "\n" or actual.stdout[file_size.value - 1, file_size.value) ≠ "\n"
+        return Scope { ok = false }
+    folder = selected.stdout[0, folder_size.value - 1)
+    file = actual.stdout[0, file_size.value - 1)
+    emit Contains { text = folder, needle = "\n" } to this get folder_newline
+    emit Contains { text = file, needle = "\n" } to this get file_newline
+    if folder_newline.yes or file_newline.yes
+        return Scope { ok = false }
+    prefix = folder + "/"
+    if folder = "/", prefix = "/"
+    emit Length { value = prefix } to core get prefix_size
+    emit Length { value = file } to core get actual_size
+    if actual_size.value ≤ prefix_size.value
+        return Scope { ok = false }
+    if file[0, prefix_size.value) ≠ prefix
+        return Scope { ok = false }
+    return Scope { ok = true }
 
 Contains { text, needle } =>
     emit Length { value = text } to core get text_length

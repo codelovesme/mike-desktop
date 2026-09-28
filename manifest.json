@@ -4,6 +4,7 @@
   "name": "mike-desktop",
   "organelles": {
     "http": "http_client",
+    "bridge": "http_server",
     "json": "json",
     "clock": "timer",
     "system_env": "env",

@@ -4,6 +4,7 @@
 link "support/process_mock.so" as proc
 link "../.code/modules/env/2.11.0/env-linux-x86_64.so" as system_env
 link "../.code/modules/http_client/2.12.1/http_client-linux-x86_64.so" as http
+link "../.code/modules/http_server/2.12.1/http_server-linux-x86_64.so" as bridge
 link "../.code/modules/json/2.12.1/json-linux-x86_64.so" as json
 link "../.code/modules/strings/2.11.0/strings-linux-x86_64.so" as strs
 link "../.code/modules/timer/2.11.0/timer-linux-x86_64.so" as clock
@@ -44,10 +45,12 @@ emit Key { id = desktop.id, name = "enter", text = "" } to this
 emit Ran to proc get still_before
 emit Length { value = still_before.items } to core get still_count
 assert still_count.value = 2
+emit Say { stdout = "/tmp/allowed\n" } to proc
+emit Say { stdout = "/tmp/allowed/invoice.pdf\n" } to proc
 emit Key { id = desktop.id, name = "y", text = "y" } to this
 emit Ran to proc get approved
 emit Length { value = approved.items } to core get approved_count
-assert approved_count.value = 3
-assert approved.items[2].command = "xdg-open"
-assert approved.items[2].args = ["/tmp/allowed/invoice.pdf"]
+assert approved_count.value = 5
+assert approved.items[4].command = "xdg-open"
+assert approved.items[4].args = ["/tmp/allowed/invoice.pdf"]
 emit CloseRequested { id = desktop.id } to this

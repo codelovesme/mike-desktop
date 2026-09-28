@@ -49,7 +49,7 @@ def fixture(email, password, root, filename, exact_path, token):
     lines = []
     for name in ("http_client", "json"):
         lines.append('link ' + code_string(module(name)) + " as " + ("http" if name == "http_client" else "json"))
-    for name, alias in (("process", "proc"), ("strings", "strs"),
+    for name, alias in (("http_server", "bridge"), ("process", "proc"), ("strings", "strs"),
                         ("timer", "clock"), ("window", "win"), ("env", "system_env")):
         lines.append('link ' + code_string(module(name)) + " as " + alias)
     lines.extend([

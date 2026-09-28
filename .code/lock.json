@@ -29,6 +29,19 @@
       ],
       "global": false
     },
+    "http_server": {
+      "name": "http_server",
+      "version": "2.12.1",
+      "source": "https://github.com/codelovesme/code/releases/tag/v2.12.1",
+      "asset": "http_server-linux-x86_64.so",
+      "sha256": "4901881a2eb3b299bf69bfc2312bd8a5a25b695392a4efe6f4f254ff4ad35e0d",
+      "handlers": [
+        "Config",
+        "Listen"
+      ],
+      "setup": "Config",
+      "global": false
+    },
     "json": {
       "name": "json",
       "version": "2.12.1",
