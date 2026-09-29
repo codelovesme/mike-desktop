@@ -123,7 +123,8 @@ def main():
             diagnostic = {key: observed.get(key) for key in ("connection", "mode", "task_id")}
         except Exception as error:
             diagnostic = str(error)
-        result["error"] = "timed out waiting for terminal UI flow: " + str(result) + " / " + str(diagnostic) + " / native_session=" + str(bool(window.current_token)) + " inserting=" + str(window.inserting_token) + " worker=" + str(window.terminal_worker is not None)
+        progress = api("mike-interface", {"_class": "InvocationProgress", "id": result["step"]}, token) if result["step"] else {}
+        result["error"] = "timed out waiting for terminal UI flow: " + str(result) + " / " + str(diagnostic) + " / progress=" + str(progress)[:300] + " / native_session=" + str(bool(window.current_token)) + " inserting=" + str(window.inserting_token) + " worker=" + str(window.terminal_worker is not None)
         window.close()
         return False
 
