@@ -20,6 +20,7 @@ CODE = os.environ.get("CODE_BIN", "/home/cdlvsm/git/codelovesme/code/target/rele
 HOST = os.environ.get("EUGLENA_HOST_URL", "http://127.0.0.1:8923").rstrip("/")
 DECLINE = os.environ.get("MIKE_TEST_DECLINE") == "1"
 STOP = os.environ.get("MIKE_TEST_STOP") == "1"
+SIGNOUT = os.environ.get("MIKE_TEST_SIGNOUT") == "1"
 
 
 def main():
@@ -53,10 +54,13 @@ def main():
         try:
             if window.port is None:
                 return True
-            if not window.current_token:
-                if not result["handoff"]:
-                    result["handoff"] = True
-                    window.accept_handoff(token)
+            if not result["handoff"]:
+                result["handoff"] = True
+                window.accept_handoff(token)
+                return True
+            if window.current_token != token:
+                return True
+            if window.inserting_token:
                 return True
             if not result["sent"]:
                 devices = api("mike-interface", {"_class": "MyDevices"}, token)
@@ -64,7 +68,7 @@ def main():
                 if not new or not new[0]["online"] or "terminal" not in new[0]["capabilities"]:
                     return True
                 result["device"] = new[0]["device_id"]
-                started = api("mike-interface", {"_class": "RunTerminalStep", "argv": ["sleep", "30"] if STOP else ["pwd"],
+                started = api("mike-interface", {"_class": "RunTerminalStep", "argv": ["sleep", "30"] if STOP or SIGNOUT else ["pwd"],
                                                    "cwd": "/tmp", "device_id": result["device"]}, token)
                 assert started["_class"] == "InvocationAccepted", started
                 result["step"] = started["id"]
@@ -74,9 +78,21 @@ def main():
             if STOP and window.terminal_worker is not None and not result["stopped"]:
                 result["stopped"] = True
                 window.stop_terminal()
+            if SIGNOUT and window.terminal_worker is not None and not result["stopped"]:
+                result["stopped"] = True
+                window.sign_out_button.clicked()
             progress = api("mike-interface", {"_class": "InvocationProgress", "id": result["step"]}, token)
             if progress.get("state") == "completed":
                 assert result["accepted"], "the native dialog was not approved: " + str(progress) + " sessions=" + str(result["sessions"])
+                if SIGNOUT:
+                    assert result["stopped"] and window.current_token == "", "sign-out did not reach the native controller"
+                    assert progress["result"]["state"] == "cancelled", progress
+                    assert window.terminal_worker is None or window.terminal_worker.poll() is not None, "worker survived sign-out"
+                    local = json.loads(window.bridge("/state")[1])
+                    assert local["connection"] == "sign in" and local["task_id"] == "", local
+                    print("PASS: signing out stopped the worker and Mike received cancellation")
+                    window.close()
+                    return False
                 if STOP:
                     assert result["stopped"], "worker finished before Stop"
                     assert progress["result"]["state"] == "cancelled", progress
@@ -107,7 +123,7 @@ def main():
             diagnostic = {key: observed.get(key) for key in ("connection", "mode", "task_id")}
         except Exception as error:
             diagnostic = str(error)
-        result["error"] = "timed out waiting for terminal UI flow: " + str(result) + " / " + str(diagnostic)
+        result["error"] = "timed out waiting for terminal UI flow: " + str(result) + " / " + str(diagnostic) + " / native_session=" + str(bool(window.current_token)) + " inserting=" + str(window.inserting_token) + " worker=" + str(window.terminal_worker is not None)
         window.close()
         return False
 

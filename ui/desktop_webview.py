@@ -89,6 +89,7 @@ class MikeWindow:
         self.closed = False
         self.connect_state = ""
         self.inserting_token = False
+        self.signing_out = False
         self.handoff_marker = ""
         self.handoff_loaded = False
         self.session_generation = 0
@@ -125,6 +126,10 @@ class MikeWindow:
         self.stop_button.set_sensitive(False)
         self.stop_button.connect("clicked", self.stop_terminal)
         header.pack_start(self.stop_button)
+        self.sign_out_button = Gtk.Button(label="Sign out")
+        self.sign_out_button.set_sensitive(False)
+        self.sign_out_button.connect("clicked", self.sign_out)
+        header.pack_end(self.sign_out_button)
         self.window.set_titlebar(header)
         self.status = Gtk.Label(label="Connecting desktop…")
         self.status.set_xalign(0)
@@ -227,6 +232,7 @@ class MikeWindow:
             self.stop_terminal()
         self.set_status("Connecting your desktop…")
         self.session_generation += 1
+        self.signing_out = False
         generation = self.session_generation
         self.connecting_token = ""
         self.inserting_token = True
@@ -240,6 +246,7 @@ class MikeWindow:
                 self.set_status("Connection failed. Try Connect Mike again.")
                 return False
             self.current_token = token
+            self.sign_out_button.set_sensitive(True)
             self.install_web_token(token)
             self.stack.set_visible_child_name("conversation")
             self.set_status("Desktop connected")
@@ -300,6 +307,8 @@ class MikeWindow:
         if event == WebKit2.LoadEvent.FINISHED:
             uri = self.web.get_uri() or ""
             if trusted_origin(uri, self.origin):
+                if self.signing_out:
+                    self.signing_out = False
                 if self.inserting_token and self.handoff_marker:
                     marker = parse_qs(urlsplit(uri).query).get("handoff", [""])[0]
                     if marker == self.handoff_marker:
@@ -349,6 +358,8 @@ class MikeWindow:
         threading.Thread(target=worker, daemon=True).start()
 
     def read_session(self) -> None:
+        if self.signing_out:
+            return
         uri = self.web.get_uri() or ""
         if not trusted_origin(uri, self.origin):
             return
@@ -379,6 +390,7 @@ class MikeWindow:
             else:
                 self.inserting_token = False
                 self.current_token = ""
+                self.sign_out_button.set_sensitive(False)
                 self.async_bridge("/disconnect", {}, lambda _status, _body: False)
                 self.stack.set_visible_child_name("welcome")
                 self.set_status("Desktop handoff did not reach the Mike window. Connect again.")
@@ -395,6 +407,7 @@ class MikeWindow:
             self.session_generation += 1
             self.stop_terminal()
             self.current_token = ""
+            self.sign_out_button.set_sensitive(False)
             self.connecting_token = ""
             self.async_bridge("/disconnect", {}, lambda _status, _body: False)
             self.stack.set_visible_child_name("welcome")
@@ -412,6 +425,7 @@ class MikeWindow:
             self.connecting_token = ""
             if status == 200:
                 self.current_token = token
+                self.sign_out_button.set_sensitive(True)
                 self.stack.set_visible_child_name("conversation")
                 self.set_status("Desktop connected")
             else:
@@ -635,6 +649,25 @@ class MikeWindow:
         if worker is not None and worker.poll() is None:
             worker.terminate()
             self.set_status("Stopping Mike's command…")
+
+    def sign_out(self, *_args) -> None:
+        self.stop_terminal()
+        self.session_generation += 1
+        self.signing_out = True
+        self.current_token = ""
+        self.sign_out_button.set_sensitive(False)
+        self.connecting_token = ""
+        self.connect_state = ""
+        self.inserting_token = False
+        self.handoff_marker = ""
+        self.stack.set_visible_child_name("welcome")
+        self.set_status("Signed out. Connect Mike to use this desktop again.")
+        self.async_bridge("/disconnect", {}, lambda _status, _body: False)
+        self.web.run_javascript(
+            "localStorage.removeItem('id:token'); localStorage.removeItem('id:who'); "
+            "localStorage.removeItem('id:role'); location.replace('/desktop/mike')",
+            None, None,
+        )
 
     def close(self, *_args) -> None:
         if self.closed:

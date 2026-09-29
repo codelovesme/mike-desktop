@@ -17,9 +17,9 @@ cdlvsm install mike
 cdlvsm mike
 ```
 
-The supervised terminal workflow is a preview. After `v0.4.0-beta.1` is
+The supervised terminal workflow is a preview. After `v0.4.0-beta.2` is
 published, install it with
-`CDLVSM_MIKE_DESKTOP_VERSION=v0.4.0-beta.1 cdlvsm upgrade mike` (or use
+`CDLVSM_MIKE_DESKTOP_VERSION=v0.4.0-beta.2 cdlvsm upgrade mike` (or use
 `cdlvsm install mike` with the same variable on a new machine). Unpinned
 installs continue to use stable `v0.3.0`. To return to that version, run
 `CDLVSM_MIKE_DESKTOP_VERSION=v0.3.0 cdlvsm upgrade mike`.
@@ -48,7 +48,9 @@ In the preview, Mike can request a terminal command on this paired computer. The
 shows its executable, arguments, and working directory and asks you locally
 before running it as your OS user. You can stop a running command. Mike sees
 the bounded output and may propose another step. Terminal work currently
-requires approval for each command; it does not request root access.
+requires approval for each command; it does not request root access. The
+desktop window's **Sign out** button ends local pairing and stops a running
+command.
 
 The guided file action remains available. Local file access is off until a
 task arrives. After Mike's action approval, the desktop asks you to choose a

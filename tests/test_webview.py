@@ -61,6 +61,7 @@ class NavigationTest(unittest.TestCase):
         window = webview.MikeWindow.__new__(webview.MikeWindow)
         window.origin = self.ORIGIN
         window.session_generation = 0
+        window.signing_out = False
         window.web = Mock()
         window.web.get_uri.return_value = self.ORIGIN + "/desktop/mike"
         window.got_session = Mock()
@@ -107,6 +108,30 @@ class NavigationTest(unittest.TestCase):
         window.got_session(view, None)
         window.install_web_token.assert_called_once_with("approved-account-token")
         window.async_bridge.assert_not_called()
+
+    def test_native_sign_out_stops_and_disconnects_before_page_reload(self):
+        window = webview.MikeWindow.__new__(webview.MikeWindow)
+        window.session_generation = 3
+        window.current_token = "account-token"
+        window.connecting_token = ""
+        window.connect_state = "pending"
+        window.inserting_token = False
+        window.handoff_marker = "marker"
+        window.stop_terminal = Mock()
+        window.sign_out_button = Mock()
+        window.stack = Mock()
+        window.set_status = Mock()
+        window.async_bridge = Mock()
+        window.web = Mock()
+        window.sign_out()
+        window.stop_terminal.assert_called_once()
+        self.assertEqual(window.current_token, "")
+        self.assertEqual(window.session_generation, 4)
+        self.assertTrue(window.signing_out)
+        self.assertEqual(window.async_bridge.call_args.args[:2], ("/disconnect", {}))
+        script = window.web.run_javascript.call_args.args[0]
+        self.assertIn("localStorage.removeItem('id:token')", script)
+        self.assertIn("location.replace('/desktop/mike')", script)
 
 
 if __name__ == "__main__":
