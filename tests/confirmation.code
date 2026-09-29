@@ -12,6 +12,9 @@ link "../.code/modules/window/2.11.0/window-linux-x86_64.so" as win
 link "../src/files.gene.code"
 link "../src/desktop.gene.code"
 
+emit DesktopCapabilities to this get legacy_capabilities
+assert legacy_capabilities.items = ["file_search", "file_open"]
+
 emit StartDesktop { headless = true } to this get desktop
 assert desktop ∈ DesktopStarted
 emit ReceiveTask { task = InterfaceTask { id = "needs-folder", goal = "find a local file" } } to this

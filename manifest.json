@@ -1,6 +1,6 @@
 {
   "code": ">=2.12.1",
-  "description": "A native desktop interface for Mike with a locally confirmed file search and open workflow.",
+  "description": "Mike's native desktop interface with locally approved terminal and file tasks.",
   "name": "mike-desktop",
   "organelles": {
     "http": "http_client",

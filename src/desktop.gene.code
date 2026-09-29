@@ -13,6 +13,8 @@ root = ""
 task_id = ""
 task_goal = ""
 match_path = ""
+terminal_argv = []
+terminal_cwd = ""
 turn_id = ""
 connection = "sign in"
 message = ""
@@ -28,6 +30,11 @@ bridge_dir = ""
 recent_lines = []
 panel_lines = []
 panel_title = "RECENT CONVERSATION  ·  synced with Mike"
+
+DesktopCapabilities =>
+    if bridge_secret ≠ ""
+        return DeviceCapabilities { items = ["file_search", "file_open", "terminal"] }
+    return DeviceCapabilities { items = ["file_search", "file_open"] }
 
 | All requests go to the fixed Euglena service or an explicit local test
 | endpoint. Particle names and arguments remain typed; no model text becomes
@@ -56,7 +63,7 @@ StartDesktop { headless } =>
             return BridgeUnavailable
         bridge_dir = location.value
         emit PrepareStore to this
-        emit Config { host = "127.0.0.1", port = 0, max_body_bytes = 4096, response_timeout_seconds = 150 } to bridge get configured
+        emit Config { host = "127.0.0.1", port = 0, max_body_bytes = 65536, response_timeout_seconds = 150 } to bridge get configured
         if configured ∈ Exception or not configured.ok
             return BridgeUnavailable
         emit Listen {} to bridge get listening
@@ -355,9 +362,10 @@ SignIn =>
     return connected
 
 ConnectAccount =>
+    emit DesktopCapabilities to this get offered
     emit LoadIdentity { owner = email } to this get saved
     if saved ∈ SavedIdentity
-        emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = Heartbeat { device_id = saved.device_id, credential = saved.credential, capabilities = ["file_search", "file_open"] } } } to this get reused
+        emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = Heartbeat { device_id = saved.device_id, credential = saved.credential, capabilities = offered.items } } } to this get reused
         if reused ∈ DeviceOnline
             device_id = saved.device_id
             credential = saved.credential
@@ -378,7 +386,7 @@ ConnectAccount =>
     credential = paired.credential
     emit SaveIdentity { owner = email, id = device_id, secret = credential } to this get stored
     emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = SetDefaultDevice { device_id = device_id } } } to this
-    emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = Heartbeat { device_id = device_id, credential = credential, capabilities = ["file_search", "file_open"] } } } to this get first_pulse
+    emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = Heartbeat { device_id = device_id, credential = credential, capabilities = offered.items } } } to this get first_pulse
     connection = "offline"
     if first_pulse ∈ DeviceOnline, connection = "connected"
     mode = "ready"
@@ -396,7 +404,7 @@ Request { method, path, body, headers } =>
     if bridge_secret = "" or headers.authorization ≠ "Bearer " + bridge_secret
         return Response { status = 403, body = "forbidden" }
     if method = "GET" and path = "/state"
-        state = { connection = connection, mode = mode, owner = email, task_id = task_id, goal = task_goal, file = match_path, message = message }
+        state = { connection = connection, mode = mode, owner = email, task_id = task_id, goal = task_goal, file = match_path, argv = terminal_argv, cwd = terminal_cwd, message = message }
         emit Stringify { value = state } to json get encoded
         return Response { status = 200, body = encoded.value, content_type = "application/json" }
     if method ≠ "POST"
@@ -414,7 +422,10 @@ Request { method, path, body, headers } =>
         if token = request.token and email = account.email and credential ≠ ""
             return Response { status = 200, body = "connected" }
         if task_id ≠ ""
-            emit FinishTask { outcome = "declined", detail = "desktop account changed" } to this
+            if mode = "terminal_review" or mode = "terminal_running"
+                emit FinishTerminalStep { state = "cancelled", exit_code = null, stdout = "", stderr = "desktop account changed" } to this
+            if mode ≠ "terminal_review" and mode ≠ "terminal_running"
+                emit FinishTask { outcome = "declined", detail = "desktop account changed" } to this
         token = request.token
         email = account.email
         credential = ""
@@ -426,7 +437,10 @@ Request { method, path, body, headers } =>
         return Response { status = 503, body = "gateway unavailable" }
     if path = "/disconnect"
         if task_id ≠ ""
-            emit FinishTask { outcome = "declined", detail = "desktop disconnected" } to this
+            if mode = "terminal_review" or mode = "terminal_running"
+                emit FinishTerminalStep { state = "cancelled", exit_code = null, stdout = "", stderr = "desktop disconnected" } to this
+            if mode ≠ "terminal_review" and mode ≠ "terminal_running"
+                emit FinishTask { outcome = "declined", detail = "desktop disconnected" } to this
         token = ""
         credential = ""
         device_id = ""
@@ -460,6 +474,25 @@ Request { method, path, body, headers } =>
             return Response { status = 409, body = "no task" }
         emit FinishTask { outcome = "declined", detail = "the person declined the task" } to this
         return Response { status = 200, body = "declined" }
+    if path = "/terminal/decline"
+        if mode ≠ "terminal_review" or task_id = ""
+            return Response { status = 409, body = "no terminal step to review" }
+        emit FinishTerminalStep { state = "denied", exit_code = null, stdout = "", stderr = "the person declined the command" } to this
+        return Response { status = 200, body = "declined" }
+    if path = "/terminal/start"
+        if mode ≠ "terminal_review" or task_id = ""
+            return Response { status = 409, body = "no terminal step to start" }
+        mode = "terminal_running"
+        return Response { status = 200, body = "started" }
+    if path = "/terminal/complete"
+        if mode ≠ "terminal_running" or task_id = "" or request.id ≠ task_id
+            return Response { status = 409, body = "no matching running terminal step" }
+        if request.state ∉ String or request.stdout ∉ String or request.stderr ∉ String
+            return Response { status = 400, body = "invalid terminal result" }
+        emit FinishTerminalStep { state = request.state, exit_code = request.exit_code, stdout = request.stdout, stderr = request.stderr } to this get finished
+        if finished ∉ TerminalStepFinished
+            return Response { status = 503, body = "terminal result was not reported" }
+        return Response { status = 200, body = "completed" }
     return Response { status = 404, body = "unknown route" }
 
 LoadRecentReply =>
@@ -508,13 +541,16 @@ RefreshDesktop =>
     if not active
         return Stopped
     if token ≠ "" and credential ≠ ""
-        emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = Heartbeat { device_id = device_id, credential = credential, capabilities = ["file_search", "file_open"] } } } to this get pulse
+        emit DesktopCapabilities to this get offered
+        emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = Heartbeat { device_id = device_id, credential = credential, capabilities = offered.items } } } to this get pulse
         if pulse ∈ DeviceOnline
             connection = "connected"
             if task_id = ""
                 emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = ClaimTask { device_id = device_id, credential = credential } } } to this get task
                 if task ∈ InterfaceTask
                     emit ReceiveTask { task = task } to this
+                if task ∈ TerminalStep
+                    emit ReceiveTerminalStep { task = task } to this
         if pulse ∉ DeviceOnline
             connection = "offline"
             if pulse ∈ Forbidden
@@ -586,6 +622,29 @@ ReceiveTask { task } =>
         message = "Choose a folder Mike may search for this task, or Escape to decline."
     emit DrawDesktop to this
     return TaskShown
+
+ReceiveTerminalStep { task } =>
+    task_id = task.id
+    terminal_argv = task.argv
+    terminal_cwd = task.cwd
+    task_goal = "Review terminal command"
+    mode = "terminal_review"
+    message = "Mike wants to run a command on this computer. Review it locally."
+    return TerminalStepShown
+
+FinishTerminalStep { state, exit_code, stdout, stderr } =>
+    if task_id = "" or token = "" or credential = ""
+        return TerminalStepUnavailable
+    emit ApiCall { app = "mike-interface", particle = Impulse { token = token, particle = CompleteTerminalStep { device_id = device_id, credential = credential, id = task_id, state = state, exit_code = exit_code, stdout = stdout, stderr = stderr } } } to this get completed
+    if completed ∉ TaskCompleted
+        return TerminalStepUnavailable
+    task_id = ""
+    terminal_argv = []
+    terminal_cwd = ""
+    task_goal = ""
+    mode = "ready"
+    message = "Terminal step: " + state
+    return TerminalStepFinished
 
 Decide { yes } =>
     if mode = "mike_confirm"

@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import os
 from pathlib import Path
 import secrets
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,15 @@ def allowed_navigation(target: str, origin: str) -> bool:
     return path == "/desktop/mike" or path == "/id" or path.startswith("/id/")
 
 
+def bounded_output(value: str, limit: int = 4096) -> str:
+    """Bound the UTF-8 body sent back through the native task gateway."""
+    raw = value.encode("utf-8")
+    if len(raw) <= limit:
+        return value
+    marker = "\n[output truncated]"
+    return raw[:limit - len(marker.encode())].decode("utf-8", "ignore") + marker
+
+
 class MikeWindow:
     def __init__(self, root: Path, code_bin: str, origin: str):
         self.root = root
@@ -73,9 +83,15 @@ class MikeWindow:
         self.task_dialog_open = False
         self.request_running = False
         self.opening_file = False
+        self.terminal_worker = None
+        self.terminal_step = ""
+        self.terminal_stop_requested = False
         self.closed = False
         self.connect_state = ""
         self.inserting_token = False
+        self.handoff_marker = ""
+        self.handoff_loaded = False
+        self.session_generation = 0
 
         child_env = os.environ.copy()
         child_env["MIKE_DESKTOP_BRIDGE_SECRET"] = self.secret
@@ -105,6 +121,10 @@ class MikeWindow:
         self.window.add(shell)
         header = Gtk.HeaderBar(title="Mike")
         header.set_show_close_button(True)
+        self.stop_button = Gtk.Button(label="Stop command")
+        self.stop_button.set_sensitive(False)
+        self.stop_button.connect("clicked", self.stop_terminal)
+        header.pack_start(self.stop_button)
         self.window.set_titlebar(header)
         self.status = Gtk.Label(label="Connecting desktop…")
         self.status.set_xalign(0)
@@ -203,24 +223,40 @@ class MikeWindow:
         if self.port is None:
             GLib.timeout_add(200, self.accept_handoff, token)
             return False
+        if self.current_token and self.current_token != token:
+            self.stop_terminal()
         self.set_status("Connecting your desktop…")
+        self.session_generation += 1
+        generation = self.session_generation
+        self.connecting_token = ""
+        self.inserting_token = True
+        self.handoff_loaded = False
 
         def connected(status, _body):
+            if generation != self.session_generation or self.closed:
+                return False
             if status != 200:
+                self.inserting_token = False
                 self.set_status("Connection failed. Try Connect Mike again.")
                 return False
             self.current_token = token
-            self.inserting_token = True
-            self.web.run_javascript(
-                "localStorage.setItem('id:token', " + json.dumps(token) + "); location.replace('/desktop/mike')",
-                None, None,
-            )
+            self.install_web_token(token)
             self.stack.set_visible_child_name("conversation")
             self.set_status("Desktop connected")
             return False
 
         self.async_bridge("/session", {"token": token}, connected)
         return False
+
+    def install_web_token(self, token: str) -> None:
+        self.session_generation += 1
+        self.inserting_token = True
+        self.handoff_loaded = False
+        self.handoff_marker = secrets.token_urlsafe(12)
+        self.web.run_javascript(
+            "localStorage.setItem('id:token', " + json.dumps(token) + "); location.replace('/desktop/mike?handoff=" + self.handoff_marker + "')",
+            None, None,
+        )
 
     def set_status(self, message: str) -> None:
         self.status.set_text(message)
@@ -264,6 +300,10 @@ class MikeWindow:
         if event == WebKit2.LoadEvent.FINISHED:
             uri = self.web.get_uri() or ""
             if trusted_origin(uri, self.origin):
+                if self.inserting_token and self.handoff_marker:
+                    marker = parse_qs(urlsplit(uri).query).get("handoff", [""])[0]
+                    if marker == self.handoff_marker:
+                        self.handoff_loaded = True
                 self.read_session()
 
     def load_failed(self, _view, _event, _uri, _error) -> bool:
@@ -309,24 +349,51 @@ class MikeWindow:
         threading.Thread(target=worker, daemon=True).start()
 
     def read_session(self) -> None:
-        if not trusted_origin(self.web.get_uri() or "", self.origin):
+        uri = self.web.get_uri() or ""
+        if not trusted_origin(uri, self.origin):
             return
-        self.web.run_javascript("window.localStorage.getItem('id:token') || ''", None, self.got_session)
+        generation = self.session_generation
+        self.web.run_javascript(
+            "window.localStorage.getItem('id:token') || ''", None,
+            lambda view, result: self.got_session(view, result, uri) if generation == self.session_generation else None,
+        )
 
-    def got_session(self, view, result) -> None:
+    def got_session(self, view, result, read_uri: str | None = None) -> None:
         try:
             token = view.run_javascript_finish(result).get_js_value().to_string()
         except Exception:
             return
         if not trusted_origin(view.get_uri() or "", self.origin):
             return
-        if token == self.current_token or token == self.connecting_token:
-            if token and self.inserting_token:
+        if self.inserting_token:
+            if not self.handoff_loaded:
+                return
+            observed_uri = read_uri or view.get_uri() or ""
+            marker = parse_qs(urlsplit(observed_uri).query).get("handoff", [""])[0]
+            if marker != self.handoff_marker:
+                return
+            if token == self.current_token:
                 self.inserting_token = False
+                self.handoff_marker = ""
+                self.session_generation += 1
+            else:
+                self.inserting_token = False
+                self.current_token = ""
+                self.async_bridge("/disconnect", {}, lambda _status, _body: False)
+                self.stack.set_visible_child_name("welcome")
+                self.set_status("Desktop handoff did not reach the Mike window. Connect again.")
+            return
+        if token == self.current_token or token == self.connecting_token:
+            return
+        if token and self.current_token:
+            # The native owner changes only through a browser handoff. A stale
+            # WebKit profile cannot silently switch the companion's account.
+            self.install_web_token(self.current_token)
+            self.set_status("Keeping Mike connected to the approved desktop account")
             return
         if not token:
-            if self.inserting_token:
-                return
+            self.session_generation += 1
+            self.stop_terminal()
             self.current_token = ""
             self.connecting_token = ""
             self.async_bridge("/disconnect", {}, lambda _status, _body: False)
@@ -334,9 +401,14 @@ class MikeWindow:
             self.set_status("Sign in to connect this desktop")
             return
         self.connecting_token = token
+        self.session_generation += 1
+        generation = self.session_generation
+        self.stop_terminal()
         self.set_status("Connecting your desktop…")
 
         def connected(status, _body):
+            if generation != self.session_generation or token != self.connecting_token or self.closed:
+                return False
             self.connecting_token = ""
             if status == 200:
                 self.current_token = token
@@ -369,13 +441,14 @@ class MikeWindow:
                 state = json.loads(body)
             except ValueError:
                 return False
-            if self.opening_file:
+            if state.get("connection") == "revoked":
+                self.stop_terminal()
+                self.stack.set_visible_child_name("welcome")
+                self.set_status("Desktop access revoked. Connect Mike again to resume local tasks.")
+            elif self.opening_file or self.terminal_worker is not None:
                 pass
             elif state.get("connection") == "connected":
                 self.set_status("Desktop connected")
-            elif state.get("connection") == "revoked":
-                self.stack.set_visible_child_name("welcome")
-                self.set_status("Desktop access revoked. Connect Mike again to resume local tasks.")
             elif self.current_token:
                 self.set_status("Desktop offline. Local tasks are paused.")
             task = state.get("task_id") or ""
@@ -383,7 +456,10 @@ class MikeWindow:
                 self.active_task = ""
             elif not self.task_dialog_open:
                 mode = state.get("mode")
-                if mode in ("root_task", "query") and task != self.active_task:
+                if mode == "terminal_review" and task != self.active_task:
+                    self.active_task = task
+                    self.review_terminal(state)
+                elif mode in ("root_task", "query") and task != self.active_task:
                     self.active_task = task
                     self.review_search(state)
                 elif mode == "file_confirm":
@@ -473,10 +549,98 @@ class MikeWindow:
         self.task_dialog_open = False
         self.async_bridge("/task/decline", {}, lambda _status, _body: False)
 
+    def review_terminal(self, state: dict) -> None:
+        argv, cwd, step_id = state.get("argv"), state.get("cwd"), state.get("task_id")
+        owner_token = self.current_token
+        if not isinstance(argv, list) or not argv or not all(isinstance(arg, str) for arg in argv):
+            self.set_status("The terminal request was invalid.")
+            self.async_bridge("/terminal/decline", {}, lambda _status, _body: False)
+            return
+        self.task_dialog_open = True
+        dialog = Gtk.MessageDialog(
+            transient_for=self.window, modal=True, message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO, text="Allow Mike to run this command?",
+        )
+        dialog.format_secondary_text("On this computer, as your user:\n" + shlex.join(argv) + "\n\nWorking directory: " + str(cwd) + "\n\nBounded output will be sent to Mike.")
+        approved = dialog.run() == Gtk.ResponseType.YES
+        dialog.destroy()
+        self.task_dialog_open = False
+        if not approved:
+            self.async_bridge("/terminal/decline", {}, lambda _status, _body: False)
+            return
+
+        self.terminal_stop_requested = False
+
+        def started(status, _body):
+            if status != 200:
+                self.set_status("The terminal step could not start.")
+                return False
+            if self.closed or not owner_token or owner_token != self.current_token or self.terminal_stop_requested:
+                self.async_bridge("/terminal/complete", {
+                    "id": step_id, "state": "cancelled", "exit_code": None,
+                    "stdout": "", "stderr": "terminal permission ended before execution",
+                }, lambda _status, _body: False)
+                self.set_status("Terminal permission ended before the command started.")
+                return False
+            self.terminal_step = step_id
+            self.stop_button.set_sensitive(True)
+            self.set_status("Mike is running: " + shlex.join(argv)[:120])
+            threading.Thread(target=self.run_terminal, args=(step_id, argv, cwd), daemon=True).start()
+            return False
+
+        self.async_bridge("/terminal/start", {}, started)
+
+    def run_terminal(self, step_id: str, argv: list[str], cwd: str) -> None:
+        request = json.dumps({"argv": argv, "cwd": cwd, "timeout_seconds": 60})
+        try:
+            worker = subprocess.Popen(
+                ["/usr/bin/python3", str(self.root / "ui/terminal_worker.py")],
+                cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, start_new_session=True,
+            )
+            self.terminal_worker = worker
+            if self.terminal_stop_requested:
+                worker.terminate()
+            output, error = worker.communicate(request, timeout=75)
+            result = json.loads(output)
+            if worker.returncode != 0:
+                raise RuntimeError(error[:200] or "terminal worker failed")
+        except (OSError, ValueError, subprocess.TimeoutExpired, RuntimeError) as exc:
+            if self.terminal_worker is not None and self.terminal_worker.poll() is None:
+                self.terminal_worker.terminate()
+            result = {"state": "failed", "exit_code": None, "stdout": "", "stderr": str(exc)[:300]}
+        if self.terminal_stop_requested:
+            result = {"state": "cancelled", "exit_code": None, "stdout": "", "stderr": "stopped locally"}
+        result.update(id=step_id)
+        if result.get("reason"):
+            result["stderr"] = result.get("stderr", "") + str(result["reason"])
+        result["stdout"] = bounded_output(result.get("stdout", ""))
+        result["stderr"] = bounded_output(result.get("stderr", ""))
+
+        def finished(status, _body):
+            self.terminal_worker = None
+            self.terminal_step = ""
+            self.stop_button.set_sensitive(False)
+            if status == 200:
+                self.set_status("Terminal step " + result["state"])
+            else:
+                self.set_status("Terminal result could not reach Mike; its outcome may be unknown.")
+            return False
+
+        self.async_bridge("/terminal/complete", result, finished)
+
+    def stop_terminal(self, *_args) -> None:
+        self.terminal_stop_requested = True
+        worker = self.terminal_worker
+        if worker is not None and worker.poll() is None:
+            worker.terminate()
+            self.set_status("Stopping Mike's command…")
+
     def close(self, *_args) -> None:
         if self.closed:
             return
         self.closed = True
+        self.stop_terminal()
         self.callback.shutdown()
         self.callback.server_close()
         self.child.terminate()

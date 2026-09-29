@@ -17,8 +17,15 @@ cdlvsm install mike
 cdlvsm mike
 ```
 
+The supervised terminal workflow is a preview. After `v0.4.0-beta.1` is
+published, install it with
+`CDLVSM_MIKE_DESKTOP_VERSION=v0.4.0-beta.1 cdlvsm upgrade mike` (or use
+`cdlvsm install mike` with the same variable on a new machine). Unpinned
+installs continue to use stable `v0.3.0`. To return to that version, run
+`CDLVSM_MIKE_DESKTOP_VERSION=v0.3.0 cdlvsm upgrade mike`.
+
 The install includes the needed Code runtime and a **Mike** entry in the
-applications menu. This release also needs the distribution packages
+applications menu. The desktop also needs the distribution packages
 `python3-gi`, `gir1.2-webkit2-4.1`, `xdg-desktop-portal`, and
 `xdg-desktop-portal-gtk`. Sign in with your existing Euglena account in the
 system browser when the window asks you to
@@ -37,13 +44,21 @@ history, memory, and Mike approval are available in the window. Connection
 state appears above the conversation. You can also begin a conversation on
 the website and choose this computer as the target for a local task.
 
-Local file access is off until a task arrives. After Mike's action approval,
-the desktop asks you to choose a folder with the OS picker and enter filename
+In the preview, Mike can request a terminal command on this paired computer. The desktop
+shows its executable, arguments, and working directory and asks you locally
+before running it as your OS user. You can stop a running command. Mike sees
+the bounded output and may propose another step. Terminal work currently
+requires approval for each command; it does not request root access.
+
+The guided file action remains available. Local file access is off until a
+task arrives. After Mike's action approval, the desktop asks you to choose a
+folder with the OS picker and enter filename
 words. It searches only that folder (up to six levels), shows the exact match,
 and waits for a native Yes/No before opening it. The desktop then opens the
 verified file descriptor through the document portal; a swapped symlink or
 missing portal causes the task to fail closed. Mike's model cannot supply a
-path or shell command to the desktop.
+path for this guided file action. Terminal commands use a separate local
+review and bounded worker.
 
 The pairing survives restart in `~/.local/state/mike-desktop`, with a private
 directory and credential files. The native sign-in token stays in memory. Other
@@ -86,6 +101,12 @@ same check against a release.
 `tools/bridge-e2e.py` drives the corresponding session and local task bridge
 against a real host. It uses a disposable account and replaces only the OS
 file opener with a recorder.
+
+`tools/terminal-e2e.py` exercises Mike's real terminal proposal, the paired
+gateway, a simulated local approval, the installed worker, and Mike's final
+reply. Set `MIKE_E2E_MULTI=1` to require `pwd`, `ls`, and `ps` in one turn.
+`tools/terminal-ui-smoke.py` checks the native GTK approval, decline, and Stop
+flows with a disposable account under Xvfb.
 
 Linux x86_64 is the only packaged desktop platform today. Mobile apps are
 future work.
