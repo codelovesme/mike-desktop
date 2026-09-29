@@ -27,3 +27,5 @@ This ticket is complete only when all criteria are checked with recorded evidenc
 - The public HTTPS live Mike turn proposed and completed `pwd`, `ls`, and `ps` as three separate approved commands on the extracted bundle, then answered from their output.
 - The extracted bundle's GTK Stop test approved `sleep 30`, stopped it, and Mike received `cancelled`. A worker process test proved Stop kills a grandchild even when its parent ignores `SIGTERM`.
 - The browser callback smoke passed against the extracted bundle and public HTTPS after the session-handoff fix. Python suite: 17 tests passed, one normal portal skip; the private D-Bus portal test passed separately.
+- `v0.4.0-beta.1` release CI passed and published a prerelease asset. With `CDLVSM_MIKE_DESKTOP_VERSION=v0.4.0-beta.1`, CDLVSM 0.10.2 installed it on clean Ubuntu 24.04 and Debian 13 containers; each installed its WebKit runtime and Code, reported the expected version, created the Mike desktop entry, and kept the window open under Xvfb.
+- An isolated CDLVSM install of the published beta used Code 2.13.0 and passed the real GTK approval, local `pwd` worker, and gateway result against public HTTPS.
