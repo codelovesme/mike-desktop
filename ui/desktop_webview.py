@@ -86,13 +86,17 @@ class MikeWindow:
         self.terminal_worker = None
         self.terminal_step = ""
         self.terminal_stop_requested = False
+        self.pending_disconnect = False
+        self.deferred_handoff_token = ""
         self.closed = False
         self.connect_state = ""
         self.inserting_token = False
         self.signing_out = False
+        self.require_handoff = False
         self.handoff_marker = ""
         self.handoff_loaded = False
         self.session_generation = 0
+        self.activity_log = ""
 
         child_env = os.environ.copy()
         child_env["MIKE_DESKTOP_BRIDGE_SECRET"] = self.secret
@@ -107,7 +111,13 @@ class MikeWindow:
         theme.load_from_data(b"""
             window { background: #0d1117; color: #edf2fa; }
             headerbar { background: #161b22; color: #edf2fa; border-bottom: 1px solid #303947; }
+            headerbar button { background: #212b38; color: #edf2fa; border: 1px solid #3b4655;
+                               border-radius: 7px; padding: 5px 10px; }
+            headerbar button:disabled { color: #718095; background: #19212c; }
             label { color: #edf2fa; }
+            expander { color: #dce7f5; }
+            textview, textview text { background: #111a26; color: #dce7f5; font-family: monospace; }
+            scrolledwindow { background: #111a26; border: 1px solid #303947; }
             .mike-welcome button { background: #3385fa; color: #ffffff; border: 0; border-radius: 8px;
                      padding: 10px 16px; }
             .mike-welcome button:hover { background: #4a96ff; }
@@ -137,6 +147,19 @@ class MikeWindow:
         self.status.set_margin_top(6)
         self.status.set_margin_bottom(6)
         shell.pack_start(self.status, False, False, 0)
+        self.activity_panel = Gtk.Expander(label="Local activity")
+        self.activity_panel.set_margin_start(14)
+        self.activity_panel.set_margin_end(14)
+        self.activity_panel.set_margin_bottom(6)
+        activity_scroll = Gtk.ScrolledWindow()
+        activity_scroll.set_size_request(-1, 120)
+        self.activity_view = Gtk.TextView()
+        self.activity_view.set_editable(False)
+        self.activity_view.set_cursor_visible(False)
+        self.activity_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        activity_scroll.add(self.activity_view)
+        self.activity_panel.add(activity_scroll)
+        shell.pack_start(self.activity_panel, False, False, 0)
 
         self.stack = Gtk.Stack()
         shell.pack_start(self.stack, True, True, 0)
@@ -172,6 +195,7 @@ class MikeWindow:
         self.start_callback()
         self.web.load_uri(self.origin + "/desktop/mike")
         self.window.show_all()
+        self.activity_panel.hide()
         GLib.timeout_add(200, self.wait_for_bridge)
         GLib.timeout_add_seconds(2, self.poll)
 
@@ -225,14 +249,21 @@ class MikeWindow:
     def accept_handoff(self, token: str) -> bool:
         if self.closed:
             return False
-        if self.port is None:
+        if self.port is None or self.pending_disconnect:
             GLib.timeout_add(200, self.accept_handoff, token)
             return False
         if self.current_token and self.current_token != token:
+            if self.terminal_worker is not None:
+                self.deferred_handoff_token = token
+                self.stop_terminal()
+                self.set_status("Stopping the current command before switching accounts…")
+                return False
             self.stop_terminal()
+            self.clear_activity()
         self.set_status("Connecting your desktop…")
         self.session_generation += 1
         self.signing_out = False
+        self.require_handoff = False
         generation = self.session_generation
         self.connecting_token = ""
         self.inserting_token = True
@@ -267,6 +298,17 @@ class MikeWindow:
 
     def set_status(self, message: str) -> None:
         self.status.set_text(message)
+
+    def show_activity(self, message: str) -> None:
+        self.activity_log = (self.activity_log + message + "\n")[-16000:]
+        self.activity_view.get_buffer().set_text(self.activity_log)
+        self.activity_panel.show_all()
+        self.activity_panel.set_expanded(True)
+
+    def clear_activity(self) -> None:
+        self.activity_log = ""
+        self.activity_view.get_buffer().set_text("")
+        self.activity_panel.hide()
 
     def wait_for_bridge(self) -> bool:
         if self.closed:
@@ -391,27 +433,40 @@ class MikeWindow:
                 self.inserting_token = False
                 self.current_token = ""
                 self.sign_out_button.set_sensitive(False)
+                self.clear_activity()
                 self.async_bridge("/disconnect", {}, lambda _status, _body: False)
                 self.stack.set_visible_child_name("welcome")
                 self.set_status("Desktop handoff did not reach the Mike window. Connect again.")
             return
+        if token and self.require_handoff:
+            self.web.run_javascript(
+                "localStorage.removeItem('id:token'); localStorage.removeItem('id:who'); "
+                "localStorage.removeItem('id:role')", None, None,
+            )
+            return
+        if not token:
+            if not self.current_token and not self.connecting_token:
+                return
+            self.session_generation += 1
+            self.pending_disconnect = self.terminal_worker is not None
+            self.require_handoff = True
+            self.stop_terminal()
+            self.clear_activity()
+            self.current_token = ""
+            self.sign_out_button.set_sensitive(False)
+            self.connecting_token = ""
+            if not self.pending_disconnect:
+                self.async_bridge("/disconnect", {}, lambda _status, _body: False)
+            self.stack.set_visible_child_name("welcome")
+            self.set_status("Sign in to connect this desktop")
+            return
         if token == self.current_token or token == self.connecting_token:
             return
-        if token and self.current_token:
+        if self.current_token:
             # The native owner changes only through a browser handoff. A stale
             # WebKit profile cannot silently switch the companion's account.
             self.install_web_token(self.current_token)
             self.set_status("Keeping Mike connected to the approved desktop account")
-            return
-        if not token:
-            self.session_generation += 1
-            self.stop_terminal()
-            self.current_token = ""
-            self.sign_out_button.set_sensitive(False)
-            self.connecting_token = ""
-            self.async_bridge("/disconnect", {}, lambda _status, _body: False)
-            self.stack.set_visible_child_name("welcome")
-            self.set_status("Sign in to connect this desktop")
             return
         self.connecting_token = token
         self.session_generation += 1
@@ -457,6 +512,7 @@ class MikeWindow:
                 return False
             if state.get("connection") == "revoked":
                 self.stop_terminal()
+                self.clear_activity()
                 self.stack.set_visible_child_name("welcome")
                 self.set_status("Desktop access revoked. Connect Mike again to resume local tasks.")
             elif self.opening_file or self.terminal_worker is not None:
@@ -571,6 +627,7 @@ class MikeWindow:
             self.async_bridge("/terminal/decline", {}, lambda _status, _body: False)
             return
         self.task_dialog_open = True
+        self.show_activity("Requested: " + shlex.join(argv) + "\nDirectory: " + str(cwd))
         dialog = Gtk.MessageDialog(
             transient_for=self.window, modal=True, message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.YES_NO, text="Allow Mike to run this command?",
@@ -580,6 +637,7 @@ class MikeWindow:
         dialog.destroy()
         self.task_dialog_open = False
         if not approved:
+            self.show_activity("Result: declined locally")
             self.async_bridge("/terminal/decline", {}, lambda _status, _body: False)
             return
 
@@ -599,6 +657,7 @@ class MikeWindow:
             self.terminal_step = step_id
             self.stop_button.set_sensitive(True)
             self.set_status("Mike is running: " + shlex.join(argv)[:120])
+            self.show_activity("Running…")
             threading.Thread(target=self.run_terminal, args=(step_id, argv, cwd), daemon=True).start()
             return False
 
@@ -635,7 +694,23 @@ class MikeWindow:
             self.terminal_worker = None
             self.terminal_step = ""
             self.stop_button.set_sensitive(False)
-            if status == 200:
+            if self.current_token and self.stack.get_visible_child_name() == "conversation" and not self.deferred_handoff_token:
+                summary = "Result: " + result["state"]
+                if result.get("exit_code") is not None:
+                    summary += " (exit " + str(result["exit_code"]) + ")"
+                if result["stdout"]:
+                    summary += "\nstdout:\n" + result["stdout"]
+                if result["stderr"]:
+                    summary += "\nstderr:\n" + result["stderr"]
+                self.show_activity(summary)
+            if self.pending_disconnect:
+                self.pending_disconnect = False
+                self.async_bridge("/disconnect", {}, lambda _status, _body: False)
+            elif self.deferred_handoff_token:
+                token = self.deferred_handoff_token
+                self.deferred_handoff_token = ""
+                GLib.idle_add(self.accept_handoff, token)
+            elif status == 200:
                 self.set_status("Terminal step " + result["state"])
             else:
                 self.set_status("Terminal result could not reach Mike; its outcome may be unknown.")
@@ -651,9 +726,13 @@ class MikeWindow:
             self.set_status("Stopping Mike's command…")
 
     def sign_out(self, *_args) -> None:
+        self.deferred_handoff_token = ""
+        self.pending_disconnect = self.terminal_worker is not None
         self.stop_terminal()
+        self.clear_activity()
         self.session_generation += 1
         self.signing_out = True
+        self.require_handoff = True
         self.current_token = ""
         self.sign_out_button.set_sensitive(False)
         self.connecting_token = ""
@@ -662,7 +741,8 @@ class MikeWindow:
         self.handoff_marker = ""
         self.stack.set_visible_child_name("welcome")
         self.set_status("Signed out. Connect Mike to use this desktop again.")
-        self.async_bridge("/disconnect", {}, lambda _status, _body: False)
+        if not self.pending_disconnect:
+            self.async_bridge("/disconnect", {}, lambda _status, _body: False)
         self.web.run_javascript(
             "localStorage.removeItem('id:token'); localStorage.removeItem('id:who'); "
             "localStorage.removeItem('id:role'); location.replace('/desktop/mike')",

@@ -40,6 +40,13 @@ class TerminalWorkerTest(unittest.TestCase):
             self.assertTrue(result["truncated"])
             self.assertLessEqual(len(result["stdout"].encode()), 32768)
 
+    def test_nonzero_exit_and_stderr_are_observations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = invoke(["/usr/bin/python3", "-c", "import sys; print('problem', file=sys.stderr); sys.exit(7)"], directory)
+            self.assertEqual(result["state"], "completed")
+            self.assertEqual(result["exit_code"], 7)
+            self.assertEqual(result["stderr"].strip(), "problem")
+
     def test_bridge_secret_is_not_inherited(self):
         with tempfile.TemporaryDirectory() as directory:
             env = dict(os.environ, MIKE_DESKTOP_BRIDGE_SECRET="private-test-secret")

@@ -76,6 +76,7 @@ class NavigationTest(unittest.TestCase):
         window.origin = self.ORIGIN
         window.session_generation = 0
         window.inserting_token = False
+        window.require_handoff = False
         window.current_token = ""
         window.connecting_token = ""
         window.closed = False
@@ -97,6 +98,7 @@ class NavigationTest(unittest.TestCase):
         window.origin = self.ORIGIN
         window.session_generation = 2
         window.inserting_token = False
+        window.require_handoff = False
         window.current_token = "approved-account-token"
         window.connecting_token = ""
         window.install_web_token = Mock()
@@ -114,10 +116,12 @@ class NavigationTest(unittest.TestCase):
         window.session_generation = 3
         window.current_token = "account-token"
         window.connecting_token = ""
+        window.terminal_worker = None
         window.connect_state = "pending"
         window.inserting_token = False
         window.handoff_marker = "marker"
         window.stop_terminal = Mock()
+        window.clear_activity = Mock()
         window.sign_out_button = Mock()
         window.stack = Mock()
         window.set_status = Mock()
@@ -128,10 +132,86 @@ class NavigationTest(unittest.TestCase):
         self.assertEqual(window.current_token, "")
         self.assertEqual(window.session_generation, 4)
         self.assertTrue(window.signing_out)
+        self.assertTrue(window.require_handoff)
         self.assertEqual(window.async_bridge.call_args.args[:2], ("/disconnect", {}))
         script = window.web.run_javascript.call_args.args[0]
         self.assertIn("localStorage.removeItem('id:token')", script)
         self.assertIn("location.replace('/desktop/mike')", script)
+
+    def test_sign_out_waits_for_running_step_result(self):
+        window = webview.MikeWindow.__new__(webview.MikeWindow)
+        window.session_generation = 0
+        window.current_token = "account-token"
+        window.connecting_token = ""
+        window.connect_state = ""
+        window.inserting_token = False
+        window.handoff_marker = ""
+        window.terminal_worker = Mock()
+        window.stop_terminal = Mock()
+        window.clear_activity = Mock()
+        window.sign_out_button = Mock()
+        window.stack = Mock()
+        window.set_status = Mock()
+        window.async_bridge = Mock()
+        window.web = Mock()
+        window.sign_out()
+        self.assertTrue(window.pending_disconnect)
+        window.async_bridge.assert_not_called()
+
+    def test_saved_token_cannot_reconnect_after_native_sign_out(self):
+        window = webview.MikeWindow.__new__(webview.MikeWindow)
+        window.origin = self.ORIGIN
+        window.inserting_token = False
+        window.require_handoff = True
+        window.current_token = ""
+        window.connecting_token = ""
+        window.web = Mock()
+        window.async_bridge = Mock()
+        view = Mock()
+        view.get_uri.return_value = self.ORIGIN + "/desktop/mike"
+        view.run_javascript_finish.return_value.get_js_value.return_value.to_string.return_value = "stale-token"
+        window.got_session(view, None)
+        self.assertIn("removeItem('id:token')", window.web.run_javascript.call_args.args[0])
+        window.async_bridge.assert_not_called()
+
+    def test_web_sign_out_clears_local_activity(self):
+        window = webview.MikeWindow.__new__(webview.MikeWindow)
+        window.origin = self.ORIGIN
+        window.session_generation = 0
+        window.inserting_token = False
+        window.require_handoff = False
+        window.current_token = "account-token"
+        window.connecting_token = ""
+        window.terminal_worker = None
+        window.stop_terminal = Mock()
+        window.clear_activity = Mock()
+        window.sign_out_button = Mock()
+        window.async_bridge = Mock()
+        window.stack = Mock()
+        window.set_status = Mock()
+        view = Mock()
+        view.get_uri.return_value = self.ORIGIN + "/desktop/mike"
+        view.run_javascript_finish.return_value.get_js_value.return_value.to_string.return_value = ""
+        window.got_session(view, None)
+        window.stop_terminal.assert_called_once()
+        window.clear_activity.assert_called_once()
+        self.assertEqual(window.current_token, "")
+        self.assertTrue(window.require_handoff)
+
+    def test_account_handoff_waits_for_running_step_result(self):
+        window = webview.MikeWindow.__new__(webview.MikeWindow)
+        window.closed = False
+        window.port = 1234
+        window.pending_disconnect = False
+        window.current_token = "old-token"
+        window.terminal_worker = Mock()
+        window.stop_terminal = Mock()
+        window.set_status = Mock()
+        window.async_bridge = Mock()
+        window.accept_handoff("new-token")
+        self.assertEqual(window.deferred_handoff_token, "new-token")
+        window.stop_terminal.assert_called_once()
+        window.async_bridge.assert_not_called()
 
 
 if __name__ == "__main__":

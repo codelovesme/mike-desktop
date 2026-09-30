@@ -17,11 +17,8 @@ cdlvsm install mike
 cdlvsm mike
 ```
 
-The supervised terminal workflow is a preview. After `v0.4.0-beta.2` is
-published, install it with
-`CDLVSM_MIKE_DESKTOP_VERSION=v0.4.0-beta.2 cdlvsm upgrade mike` (or use
-`cdlvsm install mike` with the same variable on a new machine). Unpinned
-installs continue to use stable `v0.3.0`. To return to that version, run
+The supervised terminal workflow ships in `v0.4.0`. To return to the earlier
+guided-file release, run
 `CDLVSM_MIKE_DESKTOP_VERSION=v0.3.0 cdlvsm upgrade mike`.
 
 The install includes the needed Code runtime and a **Mike** entry in the
@@ -44,13 +41,16 @@ history, memory, and Mike approval are available in the window. Connection
 state appears above the conversation. You can also begin a conversation on
 the website and choose this computer as the target for a local task.
 
-In the preview, Mike can request a terminal command on this paired computer. The desktop
+Mike can request a terminal command on this paired computer. The desktop
 shows its executable, arguments, and working directory and asks you locally
 before running it as your OS user. You can stop a running command. Mike sees
 the bounded output and may propose another step. Terminal work currently
 requires approval for each command; it does not request root access. The
 desktop window's **Sign out** button ends local pairing and stops a running
 command.
+The **Local activity** panel shows the reviewed command, its working
+directory, exit status, and bounded output. It clears when you sign out,
+switch accounts, or revoke the device.
 
 The guided file action remains available. Local file access is off until a
 task arrives. After Mike's action approval, the desktop asks you to choose a
@@ -108,7 +108,9 @@ file opener with a recorder.
 gateway, a simulated local approval, the installed worker, and Mike's final
 reply. Set `MIKE_E2E_MULTI=1` to require `pwd`, `ls`, and `ps` in one turn.
 `tools/terminal-ui-smoke.py` checks the native GTK approval, decline, and Stop
-flows with a disposable account under Xvfb.
+flows, sign-out, account switch, revocation, and close with a disposable
+account under Xvfb. `tools/terminal-desktop-turn-smoke.py` starts a turn inside
+the real Mike WebView and checks its visible final reply and local activity.
 
 Linux x86_64 is the only packaged desktop platform today. Mobile apps are
 future work.
