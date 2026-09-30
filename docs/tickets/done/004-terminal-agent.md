@@ -1,6 +1,6 @@
 # 004 — Mike can investigate a selected desktop with terminal commands
 
-Status: in progress. Design: [local agent plan](../../plans/004-mike-local-agent.md).
+Status: done. Design: [local agent plan](../../plans/004-mike-local-agent.md).
 
 ## First release acceptance
 
@@ -12,7 +12,7 @@ Status: in progress. Design: [local agent plan](../../plans/004-mike-local-agent
 - [x] Other owners/devices cannot read a job, claim a step, approve it, or submit its result. Offline devices are not silently replaced (gateway fixture, private bridge checks, account-switch smoke).
 - [x] Output has length and time limits; stdout, stderr, nonzero exit, timeout, missing command, cancellation, and uncertain completion remain distinct (worker tests, gateway fixture, local activity panel and GTK smoke).
 - [x] Native fixtures, Mike/gateway fixtures, a browser case, and a real Mike-to-extracted-bundle end-to-end test pass. Existing file action and conversation tests remain green (public HTTPS bundle smoke, live Mike test, nine browser cases).
-- [ ] A public tagged bundle installs through unpinned `cdlvsm install mike` on clean supported Ubuntu and Debian desktops; documented rollback works.
+- [x] A public tagged bundle installs through unpinned `cdlvsm install mike` on clean supported Ubuntu and Debian desktops; documented rollback works (v0.4.0 release and install/rollback drill).
 
 ## Reliability follow-up acceptance
 
@@ -41,3 +41,5 @@ This ticket is complete only when all criteria are checked with recorded evidenc
 - A separate empty-token check in the desktop WebView had bypassed web-menu Sign out. Its unit case and live web-menu Sign out now pass.
 - Live account-switch, revocation, and window-close smokes passed. The gateway heartbeat now stores presence separately so an overlapping heartbeat cannot reactivate a revoked device; its fixture, three live revocations, and the guided file workflow passed after deployment (`my-euglena-apps` commit `fca94f5`).
 - A live request typed inside Mike's native WebView produced the approved local `pwd` step and Mike's visible final reply. The local activity panel displayed the reviewed command, directory, exit status, and output; its screenshot was visually checked.
+- `v0.4.0` release CI passed. The full Mike browser suite passed 9/9. Clean Ubuntu 24.04 and Debian 13 containers installed unpinned v0.4.0 through CDLVSM 0.10.2, launched it under Xvfb, and created the menu entry. Debian's first attempt hit Docker DNS failure; a host-network retry passed.
+- An isolated install upgraded beta.2 → v0.4.0, rolled back to v0.3.0, and upgraded to v0.4.0 again. The published installed v0.4.0 bundle passed the native WebView turn, local approval, and visible reply against public HTTPS.
