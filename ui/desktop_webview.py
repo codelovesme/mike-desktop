@@ -22,13 +22,30 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
 import webbrowser
 
+def desktop_app_id(here: Path) -> str:
+    """The name GNOME ties the window to its menu entry by: CDLVSM writes the
+    entry as codelovesme-<package>.desktop, the package being `mike` (or the
+    legacy `mike-desktop`) — …/packages/<package>/<tag>/ui/this file."""
+    package = here.resolve().parents[2].name
+    return "codelovesme-" + (package if package in ("mike", "mike-desktop") else "mike")
+
+
 try:
     import gi
+    from gi.repository import GLib
 
+    # Before GTK starts, or it is too late: the window was named after this
+    # script, so Alt+Tab showed "Unknown" with a generic icon (the Wayland
+    # app_id and the X11 WM_CLASS must match the menu entry's file name).
+    GLib.set_prgname(desktop_app_id(Path(__file__)))
+    GLib.set_application_name("Mike")
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
     gi.require_version("WebKit2", "4.1")
-    from gi.repository import Gdk, GLib, Gtk, WebKit2
+    from gi.repository import Gdk
+
+    Gdk.set_program_class(GLib.get_prgname())
+    from gi.repository import Gtk, WebKit2
 except (ImportError, ValueError) as error:
     raise SystemExit(
         "Mike needs GTK/WebKitGTK. Install python3-gi and gir1.2-webkit2-4.1 "

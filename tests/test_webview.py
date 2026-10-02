@@ -8,6 +8,14 @@ webview = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(webview)
 
 
+class DesktopAppIdTest(unittest.TestCase):
+    def test_matches_the_menu_entry_cdlvsm_writes(self):
+        packages = Path("/prefix/share/cdlvsm/packages")
+        self.assertEqual(webview.desktop_app_id(packages / "mike/v0.4.1/ui/desktop_webview.py"), "codelovesme-mike")
+        self.assertEqual(webview.desktop_app_id(packages / "mike-desktop/v0.4.1/ui/desktop_webview.py"), "codelovesme-mike-desktop")
+        self.assertEqual(webview.desktop_app_id(Path("/src/mike-desktop/ui/desktop_webview.py")), "codelovesme-mike")
+
+
 class NavigationTest(unittest.TestCase):
     ORIGIN = "https://apps.codeloves.me"
 
