@@ -1,0 +1,40 @@
+#!/bin/sh
+# Mike's shared local service: one per OS user, normally run by systemd.
+#   mike-service run          run in the foreground (what the user unit runs)
+#   mike-service start|stop|status|restart
+#   mike-service install-unit | uninstall-unit
+set -eu
+launcher_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+here=$launcher_dir
+if [ ! -d "$here/service" ]; then
+    here=$(CDPATH= cd -- "$launcher_dir/.." && pwd)
+fi
+command=${1:-}
+case "$command" in
+  --version|-V) printf 'mike-service %s (local protocol 1)\n' "$(cat "$here/VERSION" 2>/dev/null || printf dev)"; exit 0 ;;
+  --help|-h|'') sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  run) ;;
+  *)
+    [ -x /usr/bin/python3 ] || { echo 'mike-service: Python 3 is needed for service control' >&2; exit 1; }
+    exec /usr/bin/python3 "$here/client/service_control.py" "$here" "$@" ;;
+esac
+[ "$#" -eq 1 ] || { echo 'mike-service: run takes no arguments' >&2; exit 2; }
+# The host URL is validated again by the service itself.
+host=${MIKE_SERVICE_HOST_URL:-${MIKE_DESKTOP_HOST_URL:-https://apps.codeloves.me}}
+MIKE_SERVICE_HOST_URL=$host
+export MIKE_SERVICE_HOST_URL
+if [ -n "${MIKE_SERVICE_CODE_BIN:-}" ]; then
+    interpreter=$MIKE_SERVICE_CODE_BIN
+elif [ -n "${MIKE_DESKTOP_CODE_BIN:-}" ]; then
+    interpreter=$MIKE_DESKTOP_CODE_BIN
+elif [ -x "$here/../../code/current/code" ]; then
+    interpreter="$here/../../code/current/code"
+else
+    interpreter=$(command -v cdlvsm-code || true)
+fi
+[ -n "$interpreter" ] && [ -x "$interpreter" ] || {
+    echo 'mike-service: a Code interpreter compatible with the bundled 2.12.1 modules is needed; set MIKE_SERVICE_CODE_BIN' >&2
+    exit 1
+}
+cd "$here/service"
+exec "$interpreter" run main.code

@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-spec = importlib.util.spec_from_file_location("secure_open", Path(__file__).resolve().parents[1] / "ui/secure_open.py")
+spec = importlib.util.spec_from_file_location("secure_open", Path(__file__).resolve().parents[1] / "service/adapters/secure_open.py")
 secure_open = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(secure_open)
 

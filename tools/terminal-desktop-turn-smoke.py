@@ -1,5 +1,9 @@
 #!/usr/bin/python3
-"""Start a Mike terminal turn inside the real desktop WebView."""
+"""Start a Mike terminal turn inside the real desktop WebView.
+
+The window is a client of a real scratch Mike service; run under Xvfb with a
+disposable account.
+"""
 
 import importlib.util
 import json
@@ -7,19 +11,16 @@ import os
 from pathlib import Path
 import secrets
 import sys
+import tempfile
 
-e2e_spec = importlib.util.spec_from_file_location("terminal_e2e", Path(__file__).with_name("terminal-e2e.py"))
+e2e_spec = importlib.util.spec_from_file_location("service_e2e", Path(__file__).with_name("service-e2e.py"))
 e2e = importlib.util.module_from_spec(e2e_spec)
 e2e_spec.loader.exec_module(e2e)
 
 ROOT = Path(os.environ.get("E2E_DESKTOP_DIR", Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(ROOT / "ui"))
-from desktop_webview import Gdk, GLib, Gtk, MikeWindow  # noqa: E402
-
 HOST = os.environ.get("EUGLENA_HOST_URL", "http://127.0.0.1:8923").rstrip("/")
-CODE = os.environ.get("CODE_BIN", "/home/cdlvsm/.local/bin/cdlvsm-code")
-EMAIL = e2e.EMAIL
-PASSWORD = e2e.PASSWORD
+EMAIL = os.environ.get("E2E_EMAIL", "")
+PASSWORD = os.environ.get("E2E_PASSWORD", "")
 
 
 def main():
@@ -30,7 +31,13 @@ def main():
     token = signed["token"]
     before = e2e.api("mike-interface", {"_class": "MyDevices"}, token)
     known = {one["device_id"] for one in before["items"]}
-    window = MikeWindow(ROOT, CODE, HOST)
+    service = e2e.Service(Path(tempfile.mkdtemp(prefix="mike-turn-smoke-")))
+    os.environ.update(MIKE_SERVICE_STATE_DIR=service.env["MIKE_SERVICE_STATE_DIR"],
+                      MIKE_SERVICE_RUNTIME_DIR=service.env["MIKE_SERVICE_RUNTIME_DIR"])
+    service.start()
+    sys.path.insert(0, str(ROOT / "ui"))
+    from desktop_webview import Gdk, GLib, Gtk, MikeWindow, activity_text  # noqa: E402
+    window = MikeWindow(ROOT, HOST)
     marker = "desktop-turn-" + secrets.token_hex(5)
     state = {"handoff": False, "submitting": False, "submitted": False, "approved": False,
              "display_pending": False, "display_ready": False, "step": "", "error": "", "done": False}
@@ -59,7 +66,7 @@ def main():
             if state["error"]:
                 window.close()
                 return False
-            if window.port is None:
+            if not window.attached:
                 return True
             if not state["handoff"]:
                 state["handoff"] = True
@@ -79,9 +86,9 @@ def main():
                     None, submit,
                 )
                 return True
-            local = json.loads(window.bridge("/state")[1])
-            if local.get("task_id"):
-                state["step"] = local["task_id"]
+            for entry in window.activity_seen:
+                if entry.get("kind") == "requested" and entry.get("id"):
+                    state["step"] = entry["id"]
             if state["step"]:
                 progress = e2e.api("mike-interface", {"_class": "InvocationProgress", "id": state["step"]}, token)
                 if progress.get("state") == "completed":
@@ -90,7 +97,7 @@ def main():
                     recent = e2e.api("mike", {"_class": "RecentConversation", "limit": 5}, token)
                     for turn in recent.get("turns", []):
                         if marker in turn.get("text", "") and "/tmp" in turn.get("reply", ""):
-                            if "Result: completed" not in window.activity_log:
+                            if "Result: completed" not in activity_text(window.activity_seen):
                                 return True
                             if not state["display_ready"]:
                                 if not state["display_pending"]:
@@ -100,7 +107,7 @@ def main():
                                         None, visible_reply,
                                     )
                                 return True
-                            assert state["approved"] and "stdout:\n/tmp" in window.activity_log
+                            assert state["approved"] and "stdout:\n/tmp" in activity_text(window.activity_seen)
                             shot = os.environ.get("MIKE_SCREENSHOT_PATH")
                             if shot:
                                 surface = window.window.get_window()
@@ -131,7 +138,10 @@ def main():
     GLib.timeout_add_seconds(1, check)
     GLib.timeout_add(100, approve)
     GLib.timeout_add_seconds(120, timeout)
-    Gtk.main()
+    try:
+        Gtk.main()
+    finally:
+        service.stop()
     after = e2e.api("mike-interface", {"_class": "MyDevices"}, token)
     for one in after.get("items", []):
         if one["device_id"] not in known:

@@ -1,14 +1,15 @@
 #!/bin/sh
-# Start the versioned Euglena bundle through Code.
+# Start Mike's desktop window. It is a client of the shared Mike service,
+# which it starts (through systemd when the user unit is installed) if needed.
 set -eu
 launcher_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
 here=$launcher_dir
-if [ ! -f "$here/main.code" ]; then
+if [ ! -d "$here/ui" ]; then
     here=$(CDPATH= cd -- "$launcher_dir/.." && pwd)
 fi
 case "${1:-}" in
   --version|-V) printf 'Mike %s\n' "$(cat "$here/VERSION" 2>/dev/null || printf dev)"; exit 0 ;;
-  --help|-h) printf 'Usage: mike\nConnects securely to https://apps.codeloves.me. Sign in with your account.\n'; exit 0 ;;
+  --help|-h) printf 'Usage: mike\nConnects securely to https://apps.codeloves.me. Sign in with your account.\nLocal tasks run in the shared Mike service: see mike-service --help.\n'; exit 0 ;;
 esac
 [ "$#" -eq 0 ] || { echo 'mike: unexpected argument' >&2; exit 2; }
 host=${MIKE_DESKTOP_HOST_URL:-https://apps.codeloves.me}
@@ -23,23 +24,6 @@ case "$host" in
 esac
 MIKE_DESKTOP_HOST_URL=$host
 export MIKE_DESKTOP_HOST_URL
-if [ -n "${MIKE_DESKTOP_CODE_BIN:-}" ]; then
-    interpreter=$MIKE_DESKTOP_CODE_BIN
-elif [ -x "$here/../../code/current/code" ]; then
-    interpreter="$here/../../code/current/code"
-else
-    interpreter=$(command -v cdlvsm-code || true)
-fi
-[ -n "$interpreter" ] && [ -x "$interpreter" ] || {
-    echo 'mike: Code 2.12.1 is needed; install with cdlvsm install mike' >&2
-    exit 1
-}
-cd "$here"
-if [ "${MIKE_DESKTOP_TEXT_UI:-}" = 1 ]; then
-    exec "$interpreter" run main.code
-fi
-MIKE_DESKTOP_CODE_BIN=$interpreter
-export MIKE_DESKTOP_CODE_BIN
 if [ -x /usr/bin/python3 ]; then
     exec /usr/bin/python3 "$here/ui/desktop_webview.py"
 fi

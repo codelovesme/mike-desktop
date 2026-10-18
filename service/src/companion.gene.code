@@ -1,0 +1,1184 @@
+| Mike's shared local service. One instance per OS user owns this machine's
+| paired device: it keeps the pairing credential, claims the device's tasks
+| from Mike Interface, runs a tool only after a local client relays the
+| person's approval, and reports the bounded result. Desktop, and later CLI
+| or IDE, attach through the local protocol below. They present approvals;
+| they never receive the credential and never execute the tool themselves.
+|
+| A gene's handlers see only its own file's top level, so every handler that
+| reads service state lives here, in sections: lifecycle, gateway, pairing,
+| generations, the task, execution, and the local protocol. The file sorts
+| before the nucleus, so these bindings exist before StartService runs.
+| files.gene.code holds the stateless file search and scope checks.
+
+protocol_version = 1
+service_version = "0.5.0-dev"
+host_url = "https://apps.codeloves.me"
+state_dir = ""
+runtime_dir = ""
+adapters_dir = ""
+own_pid = ""
+client_key = ""
+listen_port = 0
+running = false
+notices = 0
+spawned = 0
+
+account_email = ""
+account_token = ""
+device_id = ""
+credential = ""
+connection = "signed_out"
+revoked_latch = false
+generation = 1
+ended_reason = ""
+activity = []
+work = null
+decided = []
+recovery = null
+device_refused = false
+sessions = []
+turns = []
+session_serial = 0
+
+Capabilities =>
+    return DeviceCapabilities { items = ["file_search", "file_open", "terminal"] }
+
+| Only the fixed public service or an explicit loopback test host. No task
+| field ever becomes part of a URL.
+AllowedHost { url } =>
+    if url = "https://apps.codeloves.me"
+        return Allowed { ok = true }
+    if url ∉ String
+        return Allowed { ok = false }
+    prefix = url[0, 17)
+    if prefix ≠ "http://127.0.0.1:" and prefix ≠ "http://localhost:"
+        return Allowed { ok = false }
+    emit Digits { text = url[17, length) } to this get port
+    return Allowed { ok = port.ok }
+
+Digits { text } =>
+    emit Length { value = text } to core get size
+    if size.value < 1 or size.value > 5
+        return DigitsResult { ok = false }
+    allowed = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+    i = 0
+    loop
+        if i ≥ size.value
+            break
+        ch = text[i]
+        found = false
+        loop d over allowed
+            if d = ch, found = true
+        if not found
+            return DigitsResult { ok = false }
+        i += 1
+    return DigitsResult { ok = true }
+
+OptionalSetting { name } =>
+    emit Get { name = name, default = "" } to system_env get got
+    if got ∈ Exception or got.value ∉ String
+        return Setting { value = "" }
+    return Setting { value = got.value }
+
+Configure =>
+    emit OptionalSetting { name = "HOME" } to this get home
+    if home.value = ""
+        return NotConfigured { reason = "HOME is not set" }
+    emit OptionalSetting { name = "MIKE_SERVICE_HOST_URL" } to this get chosen_host
+    if chosen_host.value ≠ ""
+        emit AllowedHost { url = chosen_host.value } to this get allowed
+        if not allowed.ok
+            return NotConfigured { reason = "MIKE_SERVICE_HOST_URL must be https://apps.codeloves.me or http://127.0.0.1:<port>" }
+        host_url = chosen_host.value
+    state_dir = home.value + "/.local/state/mike-service"
+    emit OptionalSetting { name = "MIKE_SERVICE_STATE_DIR" } to this get chosen_state
+    if chosen_state.value ≠ "", state_dir = chosen_state.value
+    runtime_dir = state_dir + "/run"
+    emit OptionalSetting { name = "XDG_RUNTIME_DIR" } to this get xdg
+    if xdg.value ≠ "", runtime_dir = xdg.value + "/mike-service"
+    emit OptionalSetting { name = "MIKE_SERVICE_RUNTIME_DIR" } to this get chosen_runtime
+    if chosen_runtime.value ≠ "", runtime_dir = chosen_runtime.value
+    emit PrivateDirectory { path = state_dir } to this get state_private
+    if state_private ∉ PrivateReady
+        return NotConfigured { reason = "the state directory is not private to this user: " + state_dir }
+    emit PrivateDirectory { path = runtime_dir } to this get runtime_private
+    if runtime_private ∉ PrivateReady
+        return NotConfigured { reason = "the runtime directory is not private to this user: " + runtime_dir }
+    emit Run { command = "pwd" } to proc get here
+    if here ∈ Exception or not here.success
+        return NotConfigured { reason = "the working directory is unknown" }
+    emit Trim { value = here.stdout } to strs get folder
+    adapters_dir = folder.value + "/adapters"
+    | The shell's parent is this Code process: its pid ties the instance lock
+    | to this process's lifetime.
+    emit Run { command = "sh", args = ["-c", "echo \$PPID"] } to proc get parent
+    if parent ∈ Exception or not parent.success
+        return NotConfigured { reason = "could not identify this process" }
+    emit Trim { value = parent.stdout } to strs get pid
+    own_pid = pid.value
+    return Configured
+
+| A directory holding a credential: absolute, a real directory (not a
+| symlink), owned by this user, mode 0700. Another OS user's directory, or a
+| shared one, is refused rather than repaired.
+PrivateDirectory { path } =>
+    if path ∉ String or path = "" or path[0, 1) ≠ "/"
+        return NotPrivate
+    emit Run { command = "mkdir", args = ["-p", "-m", "700", "--", path] } to proc get made
+    if made ∈ Exception or not made.success
+        return NotPrivate
+    emit Run { command = "chmod", args = ["700", "--", path] } to proc get closed
+    if closed ∈ Exception or not closed.success
+        return NotPrivate
+    emit Run { command = "id", args = ["-u"] } to proc get uid
+    emit Run { command = "stat", args = ["-c", "%F:%u:%a", "--", path] } to proc get seen
+    if uid ∈ Exception or seen ∈ Exception or not uid.success or not seen.success
+        return NotPrivate
+    emit Trim { value = uid.stdout } to strs get me
+    if seen.stdout ≠ "directory:" + me.value + ":700\n"
+        return NotPrivate
+    return PrivateReady
+
+| One service per OS user. `flock` holds the lock in a helper that exits
+| when this process does (`tail --pid`), so a crash frees it within a second
+| and a restart retries briefly; a second live start is refused.
+AcquireInstance =>
+    lock = runtime_dir + "/instance.lock"
+    attempt = 0
+    loop
+        attempt += 1
+        emit Spawn { id = "instance-lock-" + attempt, command = "flock", args = ["-n", "-E", "75", lock, "tail", "--pid=" + own_pid, "-f", "/dev/null"] } to proc get holder
+        if holder ∈ Exception
+            return InstanceRefused { reason = "flock and tail are needed to lock the service instance" }
+        emit Run { command = "sleep", args = ["0.3"] } to proc
+        emit Status { id = holder.id } to proc get held
+        if held ∈ StatusResult and held.alive
+            return InstanceOwned
+        if held ∉ StatusResult or held.code ≠ 75
+            return InstanceRefused { reason = "could not lock " + lock }
+        if attempt ≥ 6
+            break
+        emit Run { command = "sleep", args = ["0.5"] } to proc
+    return InstanceRefused { reason = "another Mike service is already running for this user (" + runtime_dir + ")" }
+
+| One line to the service's standard output, which systemd keeps in the
+| journal. Spawned children inherit stdout; nothing else in the language
+| prints. The child lingers a second after printing: journald attributes a
+| line to the unit by the writer's cgroup, and loses it for a process that
+| has already exited. A fatal notice waits for that second, because the
+| program (and the unit with it) ends right after. Never pass a token, a
+| credential or command output here.
+Notice { text, fatal } =>
+    if notices > 0
+        emit Status { id = "notice-" + notices } to proc
+    notices += 1
+    emit Spawn { id = "notice-" + notices, command = "sh", args = ["-c", "printf 'mike-service: %s\\n' \"\$0\"; exec sleep 1", text] } to proc get shown
+    if shown ∉ Exception and fatal = true
+        emit Wait { id = shown.id } to proc
+    return Noticed
+
+RandomToken =>
+    emit Run { command = "cat", args = ["/proc/sys/kernel/random/uuid", "/proc/sys/kernel/random/uuid"] } to proc get read
+    if read ∈ Exception or not read.success
+        return NoToken
+    emit Split { value = read.stdout, separator = "-" } to strs get groups
+    joined = ""
+    loop part over groups.value
+        joined += part
+    emit Split { value = joined, separator = "\n" } to strs get lines
+    value = ""
+    loop part over lines.value
+        value += part
+    emit Length { value = value } to core get size
+    if size.value ≠ 64
+        return NoToken
+    return Token { value = value }
+
+| Written as 0600 beside the target and renamed over it, so a reader never
+| sees half a key. No shell interprets the path or the content.
+WritePrivate { path, text } =>
+    emit Run { command = "install", args = ["-m", "600", "/dev/stdin", path + ".new"], stdin = text } to proc get wrote
+    if wrote ∈ Exception or not wrote.success
+        return NotWritten
+    emit Run { command = "mv", args = ["-f", "-T", "--", path + ".new", path] } to proc get moved
+    if moved ∈ Exception or not moved.success
+        return NotWritten
+    return Written
+
+ReadPrivate { path } =>
+    emit Run { command = "cat", args = ["--", path] } to proc get read
+    if read ∈ Exception or not read.success
+        return NothingRead
+    return ReadText { text = read.stdout }
+
+StartService =>
+    emit Configure to this get configured
+    if configured ∉ Configured
+        emit Notice { fatal = true, text = "not started: " + configured.reason } to this
+        return configured
+    emit AcquireInstance to this get owned
+    if owned ∉ InstanceOwned
+        emit Notice { fatal = true, text = "not started: " + owned.reason } to this
+        return owned
+    emit RandomToken to this get key
+    if key ∉ Token
+        emit Notice { fatal = true, text = "not started: no random source for the client key" } to this
+        return NotConfigured { reason = "no random source" }
+    client_key = key.value
+    emit Config { host = "127.0.0.1", port = 0, max_body_bytes = 65536, response_timeout_seconds = 40 } to local get set
+    if set ∈ Exception or not set.ok
+        emit Notice { fatal = true, text = "not started: the local listener could not be configured" } to this
+        return NotConfigured { reason = "listener" }
+    emit WritePrivate { path = runtime_dir + "/client.key", text = client_key } to this get wrote_key
+    if wrote_key ∉ Written
+        emit Notice { fatal = true, text = "not started: could not write the client key" } to this
+        return NotConfigured { reason = "client key" }
+    emit Listen {} to local get listening
+    if listening ∈ Exception or not listening.ok
+        emit Notice { fatal = true, text = "not started: could not listen on loopback" } to this
+        return NotConfigured { reason = "listen" }
+    listen_port = listening.port
+    endpoint = { protocol = protocol_version, port = listen_port, pid = own_pid, service = service_version }
+    emit Stringify { value = endpoint } to json get endpoint_text
+    emit WritePrivate { path = runtime_dir + "/endpoint", text = endpoint_text.value } to this get wrote_endpoint
+    if wrote_endpoint ∉ Written
+        emit Stop {} to local
+        emit Notice { fatal = true, text = "not started: could not publish the endpoint" } to this
+        return NotConfigured { reason = "endpoint" }
+    emit LoadRecovery to this
+    running = true
+    emit Notice { text = "ready for local clients on 127.0.0.1:" + listen_port + " (protocol " + protocol_version + ", host " + host_url + ")" } to this
+    return ServiceStarted
+
+| ---- Mike Interface: the existing authenticated outward gateway ----
+
+ApiCall { app, particle } =>
+    if app ≠ "auth" and app ≠ "mike" and app ≠ "mike-interface"
+        return ApiUnavailable
+    emit Post { url = host_url + "/api/" + app, body = "$particle", content_type = "application/json", timeout_seconds = 12 } to http get response
+    if response ∈ Exception or not response.ok or response.status ≠ 200
+        return ApiUnavailable
+    emit Parse { text = response.body } to json get parsed
+    if parsed ∈ Exception or parsed.value ∉ Object or parsed.value._class ∉ String
+        return ApiUnavailable
+    return parsed.value
+
+Gateway { particle } =>
+    if account_token = ""
+        return ApiUnavailable
+    emit ApiCall { app = "mike-interface", particle = Impulse { token = account_token, particle = particle } } to this get answer
+    return answer
+
+AccountFor { token } =>
+    emit ApiCall { app = "auth", particle = Impulse { token = token, particle = Me } } to this get account
+    if account ∉ Account or account.active ≠ true or account.verified ≠ true or account.email ∉ String
+        return NoAccount
+    return account
+
+| ---- The pairing, kept private to this service ----
+
+LoadIdentity { owner } =>
+    emit ReadPrivate { path = state_dir + "/owner" } to this get saved_owner
+    if saved_owner ∉ ReadText or saved_owner.text ≠ owner
+        return NoIdentity
+    emit ReadPrivate { path = state_dir + "/device_id" } to this get saved_id
+    emit ReadPrivate { path = state_dir + "/credential" } to this get saved_secret
+    if saved_id ∉ ReadText or saved_secret ∉ ReadText or saved_id.text = "" or saved_secret.text = ""
+        return NoIdentity
+    return SavedIdentity { device_id = saved_id.text, credential = saved_secret.text }
+
+SaveIdentity { owner, id, secret } =>
+    emit WritePrivate { path = state_dir + "/owner", text = owner } to this get one
+    emit WritePrivate { path = state_dir + "/device_id", text = id } to this get two
+    emit WritePrivate { path = state_dir + "/credential", text = secret } to this get three
+    if one ∉ Written or two ∉ Written or three ∉ Written
+        return NotWritten
+    return Written
+
+ForgetIdentity =>
+    emit Run { command = "rm", args = ["-f", "--", state_dir + "/owner", state_dir + "/device_id", state_dir + "/credential"] } to proc
+    return Forgotten
+
+| Reuse this account's saved pairing; pair afresh only when there is none or
+| the gateway refuses it. An unreachable gateway is offline, not a reason to
+| create a second device.
+ConnectAccount { token, email } =>
+    account_token = token
+    account_email = email
+    emit Capabilities to this get offered
+    emit LoadIdentity { owner = email } to this get saved
+    if saved ∈ SavedIdentity
+        emit Gateway { particle = Heartbeat { device_id = saved.device_id, credential = saved.credential, capabilities = offered.items } } to this get reused
+        if reused ∉ Forbidden
+            device_id = saved.device_id
+            credential = saved.credential
+            connection = "offline"
+            if reused ∈ DeviceOnline, connection = "connected"
+            emit Notice { text = "connected with this computer's saved pairing" } to this
+            return Connected
+        emit ForgetIdentity to this
+    emit Run { command = "uname", args = ["-n"] } to proc get machine
+    name = "Mike on this computer"
+    if machine ∉ Exception and machine.success
+        emit Trim { value = machine.stdout } to strs get host_name
+        if host_name.value ≠ "", name = "Mike on " + host_name.value
+    emit Gateway { particle = PairDevice { name = name, platform = "linux" } } to this get paired
+    if paired ∉ DevicePaired
+        account_token = ""
+        account_email = ""
+        connection = "gateway_unavailable"
+        return NotConnected
+    device_id = paired.device_id
+    credential = paired.credential
+    emit SaveIdentity { owner = email, id = device_id, secret = credential } to this get stored
+    emit Gateway { particle = SetDefaultDevice { device_id = device_id } } to this
+    emit Gateway { particle = Heartbeat { device_id = device_id, credential = credential, capabilities = offered.items } } to this get first
+    connection = "offline"
+    if first ∈ DeviceOnline, connection = "connected"
+    if stored ∉ Written
+        emit Note { text = "Paired, but the pairing could not be saved privately; this computer will pair again after a restart." } to this
+    emit Notice { text = "paired this computer as a new device" } to this
+    return Connected
+
+ClearAccount =>
+    account_token = ""
+    account_email = ""
+    device_id = ""
+    credential = ""
+    return Cleared
+
+| ---- Generations: what one owner's clients may see ----
+|
+| Signing out, switching accounts and revocation each end the generation.
+| Work in progress is stopped and, where the device may still speak, reported
+| first; activity and decisions are dropped; every attached session becomes
+| stale and must attach again, so no client shows the previous owner's
+| results.
+EndGeneration { reason, detail, can_report } =>
+    emit AbandonWork { detail = detail, can_report = can_report } to this
+    generation += 1
+    ended_reason = reason
+    activity = []
+    decided = []
+    emit ForgetTurns to this
+    return GenerationEnded
+
+LoseDevice { detail } =>
+    emit EndGeneration { reason = "device_revoked", detail = detail, can_report = false } to this
+    emit ForgetIdentity to this
+    emit ClearInflight to this
+    recovery = null
+    emit ClearAccount to this
+    connection = "revoked"
+    revoked_latch = true
+    emit Notice { text = "device access revoked; local work stopped and the pairing was forgotten" } to this
+    return DeviceLost
+
+| ---- The heartbeat: presence, recovery, and claiming the next task ----
+
+ServiceTick =>
+    emit Timestamp to core get now
+    emit ExpireSessions { now = now.value } to this
+    if account_token ≠ "" and credential ≠ ""
+        emit Pulse to this
+    emit AdvanceWork { now = now.value } to this
+    if device_refused
+        device_refused = false
+        emit LoseDevice { detail = "this computer's access was revoked" } to this
+    emit Delay { ms = 2000, then = "ServiceTick" } to clock
+    return Ticked
+
+Pulse =>
+    emit Capabilities to this get offered
+    emit Gateway { particle = Heartbeat { device_id = device_id, credential = credential, capabilities = offered.items } } to this get pulse
+    if pulse ∈ Forbidden
+        emit LoseDevice { detail = "this computer's access was revoked" } to this
+        return Revoked
+    if pulse ∈ Denied
+        | The account session expired; a client must attach with a fresh one.
+        connection = "session_expired"
+        return Offline
+    if pulse ∉ DeviceOnline
+        connection = "offline"
+        return Offline
+    connection = "connected"
+    if recovery ≠ null
+        emit ReportRecovery to this
+    if work ≠ null
+        return Online
+    emit Gateway { particle = ClaimTask { device_id = device_id, credential = credential } } to this get task
+    if task ∈ Forbidden
+        emit LoseDevice { detail = "this computer's access was revoked" } to this
+        return Revoked
+    if task ∈ InterfaceTask or task ∈ TerminalStep
+        emit ReceiveWork { task = task } to this
+    return Online
+
+| ---- Activity: what this generation's clients see, bounded ----
+
+Remember { entry } =>
+    emit Timestamp to core get now
+    activity += [entry + { at = now.value }]
+    emit Length { value = activity } to core get count
+    if count.value > 30
+        activity = activity[count.value - 30, length)
+    return Remembered
+
+Note { text } =>
+    emit Remember { entry = { kind = "note", text = text, id = "", argv = [], cwd = "", state = "", exit_code = null, stdout = "", stderr = "" } } to this
+    return Noted
+
+| ---- The current task ----
+|
+| One task at a time, exactly as the gateway delivered it. `work` keeps one
+| shape for both kinds so every client reads the same fields.
+ReceiveWork { task } =>
+    emit Timestamp to core get now
+    emit RandomToken to this get approval
+    kind = "file"
+    argv = []
+    cwd = ""
+    goal = ""
+    if task ∈ TerminalStep
+        kind = "terminal"
+        argv = task.argv
+        cwd = task.cwd
+    if task ∈ InterfaceTask, goal = task.goal
+    work = {
+        id = task.id
+        kind = kind
+        stage = "awaiting_approval"
+        approval_id = approval.value
+        approver = ""
+        argv = argv
+        cwd = cwd
+        goal = goal
+        folder = ""
+        file = ""
+        claimed_at = now.value
+        deadline = now.value + 270
+        started_at = 0
+        pid = 0
+        process_id = ""
+        request_path = ""
+        result_path = ""
+        stop_requested = false
+        report = null
+        report_until = now.value + 290
+    }
+    emit MarkInflight { stage = "claimed" } to this
+    emit Remember { entry = { kind = "requested", text = goal, id = task.id, argv = argv, cwd = cwd, state = "", exit_code = null, stdout = "", stderr = "" } } to this
+    if approval ∉ Token
+        emit FinishWork { state = "failed", exit_code = null, stdout = "", stderr = "the local service had no random source for the approval", outcome = "failed", detail = "the local service could not prepare the approval" } to this
+        return WorkReceived
+    if kind = "terminal"
+        valid = argv ∈ Array and argv ≠ [] and cwd ∈ String and cwd ≠ ""
+        if not valid
+            emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "the step had no valid command", outcome = "failed", detail = "" } to this
+    return WorkReceived
+
+| The task waits for an approval-capable client. A claim by a session that
+| has gone is released; past the deadline the task is reported as not run.
+AdvanceWork { now } =>
+    if work = null
+        return NoWork
+    if work.stage = "running" or work.stage = "opening"
+        emit CheckWorker { now = now } to this
+        return Advanced
+    if work.stage = "reporting"
+        emit DeliverReport to this
+        return Advanced
+    if work.approver ≠ ""
+        emit SessionById { id = work.approver } to this get approver
+        if approver ∉ SessionFound
+            work = work + { approver = "" }
+    if now ≥ work.deadline
+        emit FinishWork { state = "cancelled", exit_code = null, stdout = "", stderr = "no local approval was given before the step expired; it did not run", outcome = "declined", detail = "no local approval was given before the task expired; nothing was opened" } to this
+    return Advanced
+
+Bound { text } =>
+    if text ∉ String
+        return Bounded { text = "" }
+    emit Length { value = text } to core get size
+    if size.value ≤ 4000
+        return Bounded { text = text }
+    return Bounded { text = text[0, 4000) + "\n[output truncated]" }
+
+| Records the final observation and tries to deliver it. Terminal fields are
+| used for a terminal step, outcome/detail for a file task.
+FinishWork { state, exit_code, stdout, stderr, outcome, detail } =>
+    if work = null
+        return NoWork
+    emit Bound { text = stdout } to this get out
+    emit Bound { text = stderr } to this get err
+    report = { state = state, exit_code = exit_code, stdout = out.text, stderr = err.text, outcome = outcome, detail = detail }
+    work = work + { stage = "reporting", report = report, pid = 0 }
+    entry = { kind = "result", text = detail, id = work.id, argv = work.argv, cwd = work.cwd, state = state, exit_code = exit_code, stdout = out.text, stderr = err.text }
+    if work.kind = "file"
+        entry = entry + { state = outcome }
+    emit Remember { entry = entry } to this
+    emit DeliverReport to this get delivered
+    return delivered
+
+| Delivery is retried on later ticks: repeating the same result is safe at
+| the gateway (it answers `replayed`). The local effect itself is never
+| repeated.
+DeliverReport =>
+    if work = null or work.stage ≠ "reporting"
+        return NoWork
+    result = work.report
+    completed = ApiUnavailable
+    if work.kind = "terminal"
+        emit Gateway { particle = CompleteTerminalStep { device_id = device_id, credential = credential, id = work.id, state = result.state, exit_code = result.exit_code, stdout = result.stdout, stderr = result.stderr } } to this get answered
+        completed = answered
+    if work.kind = "file"
+        emit Gateway { particle = CompleteTask { device_id = device_id, credential = credential, id = work.id, outcome = result.outcome, detail = result.detail } } to this get answered
+        completed = answered
+    if completed ∈ TaskCompleted
+        emit ClearInflight to this
+        work = null
+        return Delivered
+    if completed ∈ Forbidden
+        | Handled by the next tick: revocation ends the generation, and that
+        | must not happen from inside a delivery.
+        device_refused = true
+        return NotDelivered
+    if completed ∈ Rejected
+        emit Note { text = "Mike Interface refused this result: " + completed.reason } to this
+        emit ClearInflight to this
+        work = null
+        return NotDelivered
+    emit Timestamp to core get now
+    if now.value > work.report_until
+        emit Note { text = "The result could not reach Mike before the step expired; Mike will treat its outcome as unknown." } to this
+        emit ClearInflight to this
+        work = null
+    return NotDelivered
+
+| Ends the current task when its generation ends. A running process is
+| stopped first. With a usable device the outcome is reported once; after
+| revocation the gateway already reports the task as revoked.
+AbandonWork { detail, can_report } =>
+    if work = null
+        return NoWork
+    if work.stage = "running" or work.stage = "opening"
+        emit StopWorker { force = true } to this
+        if work.stage = "running"
+            emit CollectTerminal to this get collected
+            work = work + { stage = "reporting", report = { state = "cancelled", exit_code = null, stdout = collected.stdout, stderr = detail + "; the command was stopped", outcome = "", detail = "" } }
+        if work.stage = "opening"
+            work = work + { stage = "reporting", report = { state = "", exit_code = null, stdout = "", stderr = "", outcome = "failed", detail = detail + " while the file was being opened; whether it opened is unknown" } }
+    if work.stage ≠ "reporting"
+        work = work + { stage = "reporting", report = { state = "cancelled", exit_code = null, stdout = "", stderr = detail + " before the step ran", outcome = "declined", detail = detail + "; nothing was opened" } }
+    if can_report and account_token ≠ "" and credential ≠ ""
+        emit DeliverReport to this
+    emit ClearInflight to this
+    work = null
+    return Abandoned
+
+| ---- Restart without replay ----
+|
+| A marker is kept while a task is claimed. If the service stops with one,
+| the next start reports what is known — "did not run" before approval,
+| "unknown" once the effect had begun — and never repeats the effect.
+MarkInflight { stage } =>
+    if work = null
+        return NoWork
+    emit Stringify { value = { owner = account_email, device_id = device_id, id = work.id, kind = work.kind, stage = stage } } to json get text
+    emit WritePrivate { path = state_dir + "/inflight", text = text.value } to this get wrote
+    return wrote
+
+ClearInflight =>
+    emit Run { command = "rm", args = ["-f", "--", state_dir + "/inflight"] } to proc
+    return Cleared
+
+LoadRecovery =>
+    emit ReadPrivate { path = state_dir + "/inflight" } to this get saved
+    if saved ∉ ReadText
+        return NoRecovery
+    emit Parse { text = saved.text } to json get parsed
+    if parsed ∈ Exception or parsed.value ∉ Object or parsed.value.id ∉ String
+        emit ClearInflight to this
+        return NoRecovery
+    recovery = parsed.value
+    emit Notice { text = "a task was in progress when the service last stopped; its outcome will be reported as uncertain" } to this
+    return RecoveryLoaded
+
+ReportRecovery =>
+    if recovery = null
+        return NoRecovery
+    if recovery.owner ≠ account_email or recovery.device_id ≠ device_id
+        recovery = null
+        emit ClearInflight to this
+        return NoRecovery
+    began = recovery.stage = "running"
+    answered = ApiUnavailable
+    if recovery.kind = "terminal"
+        stderr = "the Mike service restarted before this step was approved; it did not run"
+        state = "cancelled"
+        if began
+            state = "failed"
+            stderr = "the Mike service stopped while this command was running; whether it finished is unknown"
+        emit Gateway { particle = CompleteTerminalStep { device_id = device_id, credential = credential, id = recovery.id, state = state, exit_code = null, stdout = "", stderr = stderr } } to this get sent
+        answered = sent
+    if recovery.kind = "file"
+        outcome = "declined"
+        detail = "the Mike service restarted before this task was approved; nothing was opened"
+        if began
+            outcome = "failed"
+            detail = "the Mike service stopped while opening the file; whether it opened is unknown"
+        emit Gateway { particle = CompleteTask { device_id = device_id, credential = credential, id = recovery.id, outcome = outcome, detail = detail } } to this get sent
+        answered = sent
+    if answered ∈ ApiUnavailable
+        return RecoveryPending
+    emit Note { text = "After a restart, Mike was told how far the interrupted step got." } to this
+    recovery = null
+    emit ClearInflight to this
+    return RecoveryReported
+
+| ======== Execution ========
+|
+| Supervised local execution. A worker starts only from an approval relayed
+| by the client that claimed it (the local protocol below). The Python adapters do
+| the OS work — the terminal worker bounds time and output and drops
+| privileges; the opener hands a verified descriptor to the document portal
+| — and the service keeps the process, its stop, and its result.
+
+| The worker's request and result are private files in the runtime
+| directory. Paths are positional arguments; the script text is fixed.
+StartTerminal =>
+    if work = null or work.kind ≠ "terminal" or work.stage ≠ "awaiting_approval"
+        return NotStarted
+    spawned += 1
+    name = "step-" + spawned
+    request_path = runtime_dir + "/" + name + ".request"
+    result_path = runtime_dir + "/" + name + ".result"
+    emit Stringify { value = { argv = work.argv, cwd = work.cwd, timeout_seconds = 60 } } to json get request
+    emit WritePrivate { path = request_path, text = request.value } to this get wrote
+    if wrote ∉ Written
+        emit FinishWork { state = "failed", exit_code = null, stdout = "", stderr = "the local service could not prepare the command", outcome = "", detail = "" } to this
+        return NotStarted
+    emit MarkInflight { stage = "running" } to this
+    emit Spawn { id = name, command = "/bin/sh", args = ["-c", "umask 077; exec /usr/bin/python3 \"\$0\" < \"\$1\" > \"\$2\"", adapters_dir + "/terminal_worker.py", request_path, result_path], cwd = adapters_dir } to proc get child
+    if child ∈ Exception
+        emit Run { command = "rm", args = ["-f", "--", request_path] } to proc
+        emit FinishWork { state = "failed", exit_code = null, stdout = "", stderr = "the terminal worker could not start", outcome = "", detail = "" } to this
+        return NotStarted
+    emit Timestamp to core get now
+    work = work + { stage = "running", started_at = now.value, pid = child.pid, process_id = name, request_path = request_path, result_path = result_path }
+    emit Remember { entry = { kind = "running", text = "", id = work.id, argv = work.argv, cwd = work.cwd, state = "running", exit_code = null, stdout = "", stderr = "" } } to this
+    emit Delay { ms = 250, then = WorkerTick { id = work.id } } to clock
+    return TerminalStarted
+
+| A quicker check than the heartbeat while something runs, so a result is
+| reported promptly. It re-arms only for the same task.
+WorkerTick { id } =>
+    if work = null or work.id ≠ id
+        return Ignored
+    if work.stage ≠ "running" and work.stage ≠ "opening"
+        return Ignored
+    emit Timestamp to core get now
+    emit CheckWorker { now = now.value } to this get checked
+    if checked ∈ StillRunning
+        emit Delay { ms = 250, then = WorkerTick { id = id } } to clock
+    return checked
+
+CheckWorker { now } =>
+    if work = null or work.process_id = ""
+        return NoWork
+    emit Status { id = work.process_id } to proc get status
+    alive = status ∈ StatusResult and status.alive
+    if alive
+        limit = 75
+        if work.kind = "file", limit = 150
+        if now - work.started_at ≤ limit
+            return StillRunning
+        emit StopWorker { force = true } to this
+    if work.kind = "file"
+        opened = status ∈ StatusResult and not alive and status.code = 0
+        if opened
+            emit FinishWork { state = "", exit_code = null, stdout = "", stderr = "", outcome = "opened", detail = work.file } to this
+            return WorkerDone
+        emit FinishWork { state = "", exit_code = null, stdout = "", stderr = "", outcome = "failed", detail = "the document portal could not open the reviewed file" } to this
+        return WorkerDone
+    emit CollectTerminal to this get result
+    if alive
+        emit FinishWork { state = "failed", exit_code = null, stdout = result.stdout, stderr = "the terminal worker did not finish in time and was stopped", outcome = "", detail = "" } to this
+        return WorkerDone
+    emit FinishWork { state = result.state, exit_code = result.exit_code, stdout = result.stdout, stderr = result.stderr, outcome = "", detail = "" } to this
+    return WorkerDone
+
+| SIGTERM lets the worker kill its whole command group; `Kill` would be
+| SIGKILL and orphan it. A pid is signalled only while its child has not been
+| reaped (the last Status said alive), so it cannot name another process.
+StopWorker { force } =>
+    if work = null or work.process_id = "" or work.pid = 0
+        return NotRunning
+    emit Status { id = work.process_id } to proc get status
+    if status ∉ StatusResult or not status.alive
+        return Stopped
+    emit Run { command = "kill", args = ["-TERM", "" + work.pid] } to proc
+    if not force
+        return Stopping
+    waited = 0
+    loop
+        emit Status { id = work.process_id } to proc get later
+        if later ∉ StatusResult or not later.alive
+            break
+        if waited ≥ 30
+            emit Kill { id = work.process_id } to proc
+            break
+        emit Run { command = "sleep", args = ["0.1"] } to proc
+        waited += 1
+    return Stopped
+
+| The worker's own JSON is the observation. Anything else is a failure,
+| never an invented success.
+CollectTerminal =>
+    state = "failed"
+    exit_code = null
+    stdout = ""
+    stderr = "the terminal worker returned no result"
+    if work ≠ null and work.result_path ≠ ""
+        emit Run { command = "cat", args = ["--", work.result_path] } to proc get read
+        if read ∉ Exception and read.success
+            emit Parse { text = read.stdout } to json get parsed
+            if parsed ∉ Exception and parsed.value ∈ Object and parsed.value.state ∈ String
+                found = parsed.value
+                state = found.state
+                stderr = ""
+                if found.exit_code ∈ Number, exit_code = found.exit_code
+                if found.stdout ∈ String, stdout = found.stdout
+                if found.stderr ∈ String, stderr = found.stderr
+                if found.reason ∈ String, stderr += found.reason
+                if state = "cancelled" and work.stop_requested and stderr = ""
+                    stderr = "stopped locally"
+        emit Run { command = "rm", args = ["-f", "--", work.request_path, work.result_path] } to proc
+    return Collected { state = state, exit_code = exit_code, stdout = stdout, stderr = stderr }
+
+| ======== Local client protocol ========
+|
+| The local client protocol, version 1 (docs/local-service-protocol.md).
+|
+| Loopback HTTP on an ephemeral port, published with a per-start client key
+| in this user's private runtime directory. Any request that looks like it
+| came from a browser is refused before anything else is read; the key is
+| what makes a caller this OS user's process; each attach gets its own
+| session token, so two clients never answer each other's requests. A
+| session belongs to one generation (one owner's sign-in): after sign-out,
+| an account change or revocation it is told so and must attach again.
+
+Request { method, path, body, headers } =>
+    emit Route { method = method, path = path, body = body, headers = headers } to this get answer
+    status = 500
+    value = { error = "internal", message = "the service could not answer this request" }
+    if answer ∈ Answer
+        status = answer.status
+        value = answer.value
+    emit Stringify { value = value } to json get encoded
+    text = "{\"error\":\"internal\"}"
+    if encoded ∉ Exception, text = encoded.value
+    return Response { status = status, body = text, content_type = "application/json" }
+
+Fail { status, error, message } =>
+    return Answer { status = status, value = { error = error, message = message } }
+
+Route { method, path, body, headers } =>
+    | A page in any browser sends Origin or Sec-Fetch-* on the requests that
+    | could reach here; no first-party client does. DNS rebinding changes Host.
+    if headers.origin ≠ null or headers.referer ≠ null or headers["sec-fetch-site"] ≠ null or headers["sec-fetch-mode"] ≠ null
+        emit Fail { status = 403, error = "browser_refused", message = "browser pages cannot use the local Mike service" } to this get refused
+        return refused
+    if headers.host ≠ "127.0.0.1:" + listen_port
+        emit Fail { status = 403, error = "host_refused", message = "connect to 127.0.0.1 with the published port" } to this get refused
+        return refused
+    if headers["x-mike-protocol"] ≠ "" + protocol_version
+        return Answer { status = 426, value = { error = "protocol_mismatch", message = "this service speaks protocol " + protocol_version, supported = [protocol_version], service = service_version } }
+    if not running
+        emit Fail { status = 503, error = "starting", message = "the service is starting" } to this get starting
+        return starting
+    bearer = headers.authorization
+    if bearer ∉ String or bearer = ""
+        emit Fail { status = 401, error = "unauthorized", message = "a client key or session token is required" } to this get anonymous
+        return anonymous
+    request = {}
+    if method = "POST"
+        emit Parse { text = body } to json get parsed
+        if parsed ∈ Exception or parsed.value ∉ Object
+            emit Fail { status = 400, error = "bad_request", message = "the body must be a JSON object" } to this get malformed
+            return malformed
+        request = parsed.value
+    if path = "/v1/attach"
+        if method ≠ "POST"
+            emit Fail { status = 405, error = "method_not_allowed", message = "attach is POST" } to this get wrong
+            return wrong
+        if bearer ≠ "Bearer " + client_key
+            emit Fail { status = 401, error = "unauthorized", message = "the client key was refused" } to this get refused
+            return refused
+        emit Attach { request = request } to this get attached
+        return attached
+    emit SessionByToken { bearer = bearer } to this get found
+    if found ∉ SessionFound
+        emit Fail { status = 401, error = "unauthorized", message = "unknown session; attach again" } to this get unknown
+        return unknown
+    session = found.session
+    if session.generation ≠ generation
+        emit DropSession { id = session.id } to this
+        return Answer { status = 409, value = { error = "session_ended", message = "this computer's Mike session changed; attach again", reason = ended_reason } }
+    emit TouchSession { id = session.id } to this
+    if method = "GET" and path = "/v1/state"
+        emit StateFor { session = session } to this get state
+        return Answer { status = 200, value = state.value }
+    if method ≠ "POST"
+        emit Fail { status = 405, error = "method_not_allowed", message = "use POST" } to this get wrong
+        return wrong
+    if path = "/v1/detach"
+        emit DropSession { id = session.id } to this
+        return Answer { status = 200, value = { detached = true } }
+    if path = "/v1/approvals/claim"
+        emit ClaimApproval { session = session, request = request } to this get claimed
+        return claimed
+    if path = "/v1/approvals/answer"
+        emit AnswerApproval { session = session, request = request } to this get answered
+        return answered
+    if path = "/v1/work/stop"
+        emit StopWork { session = session, request = request } to this get stopping
+        return stopping
+    if path = "/v1/signout"
+        emit SignOut { detail = "signed out on this computer" } to this
+        return Answer { status = 200, value = { signed_out = true } }
+    if path = "/v1/device/revoke"
+        emit RevokeThisDevice to this get revoked
+        return revoked
+    if path = "/v1/chat/ask"
+        emit ChatAsk { session = session, request = request } to this get asked
+        return asked
+    if path = "/v1/chat/progress"
+        emit ChatProgress { session = session, request = request } to this get progress
+        return progress
+    if path = "/v1/chat/confirm"
+        emit ChatConfirm { session = session, request = request } to this get confirmed
+        return confirmed
+    emit Fail { status = 404, error = "unknown_route", message = "no such route in protocol 1" } to this get missing
+    return missing
+
+| ---- Sessions ----
+
+SessionByToken { bearer } =>
+    loop one over sessions
+        if "Bearer " + one.token = bearer
+            return SessionFound { session = one }
+    return NoSession
+
+SessionById { id } =>
+    loop one over sessions
+        if one.id = id
+            return SessionFound { session = one }
+    return NoSession
+
+TouchSession { id } =>
+    emit Timestamp to core get now
+    kept = []
+    loop one over sessions
+        if one.id = id
+            kept += [one + { seen = now.value }]
+        if one.id ≠ id
+            kept += [one]
+    sessions = kept
+    return Touched
+
+| Detaching ends one client's session only. A claim it held is released so
+| another approval-capable client can answer; the task neither runs nor is
+| declined because a window closed. A running command keeps its bounds.
+DropSession { id } =>
+    kept = []
+    loop one over sessions
+        if one.id ≠ id, kept += [one]
+    sessions = kept
+    if work ≠ null and work.approver = id
+        work = work + { approver = "" }
+    return Dropped
+
+| A client that stops polling is detached after 45 seconds.
+ExpireSessions { now } =>
+    kept = []
+    loop one over sessions
+        if now - one.seen ≤ 45, kept += [one]
+    sessions = kept
+    if work ≠ null and work.approver ≠ ""
+        emit SessionById { id = work.approver } to this get holder
+        if holder ∉ SessionFound
+            work = work + { approver = "" }
+    return Expired
+
+Attach { request } =>
+    client = "client"
+    if request.client ∈ String and request.client ≠ ""
+        emit Length { value = request.client } to core get client_size
+        if client_size.value ≤ 40, client = request.client
+    approvals = request.approvals = true
+    mode = "none"
+    if request.connect ∈ String, mode = request.connect
+    if mode ≠ "none" and mode ≠ "auto" and mode ≠ "switch"
+        emit Fail { status = 400, error = "bad_request", message = "connect must be none, auto or switch" } to this get bad_mode
+        return bad_mode
+    if mode ≠ "none"
+        if request.token ∉ String or request.token = ""
+            emit Fail { status = 400, error = "token_required", message = "connecting needs the account's session token" } to this get no_token
+            return no_token
+        emit AccountFor { token = request.token } to this get account
+        if account ∉ Account
+            emit Fail { status = 401, error = "account_refused", message = "the account session was refused" } to this get refused
+            return refused
+        same = account_email = account.email and credential ≠ ""
+        if same, account_token = request.token
+        if not same
+            if account_email ≠ "" and account_email ≠ account.email and mode ≠ "switch"
+                emit Fail { status = 409, error = "account_mismatch", message = "this computer's Mike service is signed in to another account; connect explicitly to switch" } to this get mismatch
+                return mismatch
+            if account_email = "" and revoked_latch and mode ≠ "switch"
+                emit Fail { status = 409, error = "connect_required", message = "this computer's access was revoked; connect explicitly to pair it again" } to this get latched
+                return latched
+            if account_email ≠ "" and account_email ≠ account.email
+                emit EndGeneration { reason = "account_changed", detail = "the account on this computer changed", can_report = true } to this
+                emit ClearAccount to this
+            emit ConnectAccount { token = request.token, email = account.email } to this get connected
+            if connected ∉ Connected
+                emit Fail { status = 503, error = "gateway_unavailable", message = "the device gateway could not connect this computer" } to this get unavailable
+                return unavailable
+            revoked_latch = false
+    emit Length { value = sessions } to core get open_sessions
+    if open_sessions.value ≥ 16
+        emit Fail { status = 429, error = "too_many_clients", message = "too many local clients are attached" } to this get crowded
+        return crowded
+    emit RandomToken to this get secret
+    if secret ∉ Token
+        emit Fail { status = 503, error = "no_random_source", message = "could not create a session" } to this get no_secret
+        return no_secret
+    emit Timestamp to core get now
+    session_serial += 1
+    session = { id = "s" + session_serial, token = secret.value, client = client, approvals = approvals, seen = now.value, generation = generation }
+    sessions += [session]
+    emit StateFor { session = session } to this get state
+    return Answer { status = 200, value = { protocol = protocol_version, service = service_version, session_id = session.id, session_token = secret.value, generation = generation, state = state.value } }
+
+| ---- What a session may see ----
+|
+| Never the account token or the device credential. An approval id only for
+| a session that may answer it.
+StateFor { session } =>
+    emit Timestamp to core get now
+    clients = 0
+    approval_clients = 0
+    loop one over sessions
+        if one.generation = generation
+            clients += 1
+            if one.approvals, approval_clients += 1
+    view = null
+    if work ≠ null
+        claim = "none"
+        if work.approver ≠ "", claim = "other"
+        if work.approver = session.id, claim = "you"
+        approval_id = ""
+        awaiting = work.stage = "awaiting_approval" or work.stage = "file_confirm"
+        if session.approvals and awaiting, approval_id = work.approval_id
+        view = { id = work.id, kind = work.kind, stage = work.stage, claim = claim, approval_id = approval_id, argv = work.argv, cwd = work.cwd, goal = work.goal, folder = work.folder, file = work.file, seconds_left = work.deadline - now.value }
+    emit Capabilities to this get offered
+    value = {
+        protocol = protocol_version
+        service = service_version
+        host = host_url
+        generation = generation
+        session = session.id
+        approvals = session.approvals
+        account = account_email
+        connection = connection
+        paired = credential ≠ ""
+        capabilities = offered.items
+        clients = clients
+        approval_clients = approval_clients
+        work = view
+        activity = activity
+    }
+    return StateView { value = value }
+
+| ---- Approvals: one claimant, one answer ----
+
+FindApproval { approval_id } =>
+    if approval_id ∉ String or approval_id = ""
+        return NoApproval { status = 400, error = "bad_request", decision = "" }
+    awaiting = work ≠ null and (work.stage = "awaiting_approval" or work.stage = "file_confirm")
+    if awaiting and work.approval_id = approval_id
+        return OpenApproval
+    loop one over decided
+        if one.approval_id = approval_id
+            return NoApproval { status = 409, error = "already_decided", decision = one.decision }
+    return NoApproval { status = 404, error = "unknown_approval", decision = "" }
+
+ClaimApproval { session, request } =>
+    if not session.approvals
+        emit Fail { status = 403, error = "approvals_not_allowed", message = "this client attached without approval capability" } to this get denied
+        return denied
+    emit FindApproval { approval_id = request.approval_id } to this get open
+    if open ∈ NoApproval
+        return Answer { status = open.status, value = { error = open.error, message = "this approval is not open", decision = open.decision } }
+    if work.approver ≠ "" and work.approver ≠ session.id
+        emit Fail { status = 409, error = "claimed_elsewhere", message = "another local client is presenting this approval" } to this get taken
+        return taken
+    work = work + { approver = session.id }
+    return Answer { status = 200, value = { claimed = true, id = work.id, stage = work.stage } }
+
+Decided { approval_id, decision, session } =>
+    decided += [{ approval_id = approval_id, decision = decision, session = session }]
+    emit Length { value = decided } to core get count
+    if count.value > 20
+        decided = decided[count.value - 20, length)
+    return Recorded
+
+| The answer must come from the session that holds the claim (an unclaimed
+| approval is claimed by answering it). A repeated answer is reported as
+| already decided; nothing runs twice.
+AnswerApproval { session, request } =>
+    emit ClaimApproval { session = session, request = request } to this get claim
+    if claim.status ≠ 200
+        return claim
+    decision = request.decision
+    if decision ≠ "approve" and decision ≠ "decline"
+        emit Fail { status = 400, error = "bad_request", message = "decision must be approve or decline" } to this get unclear
+        return unclear
+    emit Decided { approval_id = work.approval_id, decision = decision, session = session.id } to this
+    if work.kind = "terminal"
+        if decision = "decline"
+            emit FinishWork { state = "denied", exit_code = null, stdout = "", stderr = "the person declined the command", outcome = "", detail = "" } to this
+            return Answer { status = 200, value = { stage = "declined" } }
+        emit StartTerminal to this get started
+        if started ∉ TerminalStarted
+            return Answer { status = 503, value = { error = "not_started", message = "the command could not start; Mike was told it failed" } }
+        return Answer { status = 200, value = { stage = "running" } }
+    if decision = "decline"
+        detail = "the person declined the task"
+        if work.stage = "file_confirm", detail = "the person declined to open the file"
+        emit FinishWork { state = "", exit_code = null, stdout = "", stderr = "", outcome = "declined", detail = detail } to this
+        return Answer { status = 200, value = { stage = "declined" } }
+    if work.stage = "awaiting_approval"
+        folder = request.folder
+        if folder ∉ String or folder = "" or folder[0, 1) ≠ "/"
+            emit FinishWork { state = "", exit_code = null, stdout = "", stderr = "", outcome = "failed", detail = "no absolute search folder was chosen" } to this
+            return Answer { status = 400, value = { error = "invalid_folder", message = "choose an absolute folder" } }
+        emit FindLocalFile { root = folder, query = request.query } to this get match
+        if match ∉ FileFound
+            emit FinishWork { state = "", exit_code = null, stdout = "", stderr = "", outcome = "failed", detail = match.reason } to this
+            return Answer { status = 404, value = { error = "no_match", message = match.reason } }
+        emit RandomToken to this get next
+        work = work + { stage = "file_confirm", folder = folder, file = match.path, approval_id = next.value }
+        emit Remember { entry = { kind = "found", text = match.path, id = work.id, argv = [], cwd = folder, state = "", exit_code = null, stdout = "", stderr = "" } } to this
+        return Answer { status = 200, value = { stage = "file_confirm", file = match.path, approval_id = next.value } }
+    spawned += 1
+    emit MarkInflight { stage = "running" } to this
+    emit BeginOpenFile { path = work.file, root = work.folder, id = "open-" + spawned, adapters = adapters_dir } to this get opening
+    if opening ∉ FileOpening
+        emit FinishWork { state = "", exit_code = null, stdout = "", stderr = "", outcome = "failed", detail = opening.reason } to this
+        return Answer { status = 409, value = { error = "not_opened", message = opening.reason } }
+    emit Timestamp to core get now
+    work = work + { stage = "opening", started_at = now.value, pid = opening.pid, process_id = opening.id }
+    emit Delay { ms = 250, then = WorkerTick { id = work.id } } to clock
+    return Answer { status = 200, value = { stage = "opening" } }
+
+StopWork { session, request } =>
+    if not session.approvals
+        emit Fail { status = 403, error = "approvals_not_allowed", message = "this client cannot control local work" } to this get denied
+        return denied
+    if work = null or work.id ≠ request.work_id or work.stage ≠ "running"
+        emit Fail { status = 409, error = "not_running", message = "that command is not running" } to this get idle
+        return idle
+    work = work + { stop_requested = true }
+    emit StopWorker { force = false } to this
+    return Answer { status = 200, value = { stopping = true } }
+
+| ---- Ending this computer's session for every client ----
+
+| Sign-out stops and reports current work, then forgets the account token.
+| The saved pairing stays private on disk, so signing in again as the same
+| account reuses this device rather than pairing another.
+SignOut { detail } =>
+    emit EndGeneration { reason = "signed_out", detail = detail, can_report = true } to this
+    emit ClearAccount to this
+    connection = "signed_out"
+    revoked_latch = false
+    emit Notice { text = "signed out; local work was stopped" } to this
+    return SignedOut
+
+| Ends this device for good: the gateway marks it revoked, the pairing is
+| deleted here, and pairing again needs an explicit connect.
+RevokeThisDevice =>
+    if account_token = "" or credential = ""
+        emit Fail { status = 409, error = "not_paired", message = "this computer has no active pairing" } to this get none
+        return none
+    revoked_id = device_id
+    emit EndGeneration { reason = "device_revoked", detail = "this computer's pairing was revoked", can_report = true } to this
+    emit Gateway { particle = RevokeDevice { device_id = revoked_id } } to this get revoked
+    remote = revoked ∈ DeviceRevoked
+    emit ForgetIdentity to this
+    emit ClearInflight to this
+    recovery = null
+    emit ClearAccount to this
+    connection = "revoked"
+    revoked_latch = true
+    emit Notice { text = "this computer's pairing was revoked by a local client" } to this
+    return Answer { status = 200, value = { revoked = true, confirmed_by_gateway = remote } }
+
+| ---- Intentional chat input for clients without the web conversation ----
+|
+| A thin pass-through to central Mike with the account's session: Mike keeps
+| the conversation and memory. A turn is visible only to the session that
+| started it.
+ForgetTurns =>
+    turns = []
+    return Forgotten
+
+ChatAsk { session, request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
+        return out
+    if request.text ∉ String or request.text = ""
+        emit Fail { status = 400, error = "bad_request", message = "text is required" } to this get empty
+        return empty
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text } } } to this get started
+    if started ∉ Thinking
+        emit Fail { status = 503, error = "mike_unavailable", message = "Mike did not start the turn" } to this get unavailable
+        return unavailable
+    turns += [{ turn_id = started.turn_id, session = session.id }]
+    return Answer { status = 200, value = { turn_id = started.turn_id } }
+
+OwnTurn { session, turn_id } =>
+    loop one over turns
+        if one.turn_id = turn_id and one.session = session.id
+            return TurnOwned
+    return NotOwned
+
+ChatProgress { session, request } =>
+    emit OwnTurn { session = session, turn_id = request.turn_id } to this get owned
+    if owned ∉ TurnOwned
+        emit Fail { status = 404, error = "unknown_turn", message = "this session did not start that turn" } to this get unknown
+        return unknown
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Progress { turn_id = request.turn_id } } } to this get turn
+    if turn ∉ Turn
+        emit Fail { status = 503, error = "mike_unavailable", message = "Mike's progress is unavailable" } to this get unavailable
+        return unavailable
+    say = ""
+    if turn.pending ∈ Object and turn.pending.say ∈ String, say = turn.pending.say
+    reply = ""
+    if turn.reply ∈ String, reply = turn.reply
+    return Answer { status = 200, value = { turn_id = request.turn_id, stage = turn.stage, reply = reply, say = say } }
+
+ChatConfirm { session, request } =>
+    emit OwnTurn { session = session, turn_id = request.turn_id } to this get owned
+    if owned ∉ TurnOwned or request.yes ∉ Boolean
+        emit Fail { status = 404, error = "unknown_turn", message = "this session did not start that turn" } to this get unknown
+        return unknown
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Confirm { turn_id = request.turn_id, yes = request.yes } } } to this get sent
+    if sent ∈ ApiUnavailable
+        emit Fail { status = 503, error = "mike_unavailable", message = "the decision did not reach Mike" } to this get unavailable
+        return unavailable
+    return Answer { status = 200, value = { sent = true } }

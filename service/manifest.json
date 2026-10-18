@@ -1,0 +1,16 @@
+{
+  "code": ">=2.12.1",
+  "description": "Mike's shared local service: this machine's paired device, supervised local tools, and a private protocol for Desktop and other local clients.",
+  "name": "mike-service",
+  "organelles": {
+    "http": "http_client",
+    "local": "http_server",
+    "json": "json",
+    "clock": "timer",
+    "system_env": "env",
+    "proc": "process",
+    "strs": "strings"
+  },
+  "runtime": "native",
+  "title": "Mike service"
+}

@@ -1,8 +1,6 @@
 | The only OS effects are fixed programs with separate arguments. A goal
-link "../.code/modules/http_client/2.12.1/http_client-linux-x86_64.so" as http
-link "../.code/modules/json/2.12.1/json-linux-x86_64.so" as json
-| cannot become an executable or a path. The UI calls OpenLocalFile only after
-| the exact match is shown and accepted.
+| cannot become an executable or a path. The service calls BeginOpenFile only
+| after the approving client has shown the exact match and it was accepted.
 
 link "support/process_mock.so" as proc
 link "../.code/modules/strings.so" as strs
@@ -34,21 +32,24 @@ emit Ran to proc get still_searches
 assert still_searches.items[1].command = "find"
 assert still_searches.items[1].args[7] = "*\$(touch PWNED)*"
 
-| The file opener receives exactly the locally found and approved path.
+| The file opener receives exactly the locally found and approved path, as
+| a tracked child so the service keeps answering while the portal waits.
 emit Say { stdout = "/tmp/allowed\n" } to proc
 emit Say { stdout = "/tmp/allowed/invoice.pdf\n" } to proc
-emit OpenLocalFile { path = found.path, root = "/tmp/allowed" } to this get opened
-assert opened ∈ FileOpened
+emit BeginOpenFile { path = found.path, root = "/tmp/allowed", id = "open-1", adapters = "/svc/adapters" } to this get opened
+assert opened ∈ FileOpening
+assert opened.id = "open-1"
 emit Ran to proc get all
 emit Length { value = all.items } to core get count
 assert count.value = 5
+assert all.items[4].spawned
 assert all.items[4].command = "/usr/bin/python3"
-assert all.items[4].args = ["ui/secure_open.py", "/tmp/allowed", "/tmp/allowed/invoice.pdf"]
+assert all.items[4].args = ["/svc/adapters/secure_open.py", "/tmp/allowed", "/tmp/allowed/invoice.pdf"]
 
 | A candidate that resolves outside the chosen folder never reaches opener.
 emit Say { stdout = "/tmp/allowed\n" } to proc
 emit Say { stdout = "/tmp/private/invoice.pdf\n" } to proc
-emit OpenLocalFile { path = found.path, root = "/tmp/allowed" } to this get escaped
+emit BeginOpenFile { path = found.path, root = "/tmp/allowed", id = "open-2", adapters = "/svc/adapters" } to this get escaped
 assert escaped ∈ FileRefused
 emit Ran to proc get after_escape
 emit Length { value = after_escape.items } to core get escape_count

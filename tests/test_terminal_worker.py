@@ -9,7 +9,7 @@ import time
 import unittest
 
 
-WORKER = Path(__file__).resolve().parents[1] / "ui/terminal_worker.py"
+WORKER = Path(__file__).resolve().parents[1] / "service/adapters/terminal_worker.py"
 
 
 def invoke(argv, cwd, timeout_seconds=5, env=None):
@@ -49,9 +49,9 @@ class TerminalWorkerTest(unittest.TestCase):
 
     def test_bridge_secret_is_not_inherited(self):
         with tempfile.TemporaryDirectory() as directory:
-            env = dict(os.environ, MIKE_DESKTOP_BRIDGE_SECRET="private-test-secret")
+            env = dict(os.environ, MIKE_SERVICE_TEST_SECRET="private-test-secret")
             result = invoke(["/usr/bin/env"], directory, env=env)
-            self.assertNotIn("MIKE_DESKTOP_BRIDGE_SECRET", result["stdout"])
+            self.assertNotIn("MIKE_SERVICE_TEST_SECRET", result["stdout"])
             status = invoke(["/usr/bin/cat", "/proc/self/status"], directory)
             self.assertIn("NoNewPrivs:\t1", status["stdout"])
 

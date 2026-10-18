@@ -1,0 +1,338 @@
+| Drive the shared service's real genes with every OS and network boundary
+| replaced: processes, the gateway, the listener and the clock are mocks,
+| so each effect can be inspected. Requests are sent to the program's own
+| `Request` handler exactly as the listener would deliver them.
+
+link "support/process_mock.so" as proc
+link "support/http_mock.so" as http
+link "support/server_mock.so" as local
+link "support/timer_mock.so" as clock
+link "../.code/modules/json.so" as json
+link "../.code/modules/strings.so" as strs
+link "../.code/modules/env.so" as system_env
+link "../src/files.gene.code"
+link "../src/companion.gene.code"
+
+Call { method, path, body, bearer, extra } =>
+    headers = { host = "127.0.0.1:40123", "x-mike-protocol" = "1", authorization = "Bearer " + bearer } + extra
+    emit Request { method = method, path = path, body = body, headers = headers } to this get answered
+    emit Parse { text = answered.body } to json get parsed
+    return Called { status = answered.status, value = parsed.value }
+
+LastPost =>
+    emit Posted to http get record
+    emit Length { value = record.items } to core get count
+    emit Parse { text = record.items[count.value - 1].body } to json get parsed
+    return LastPosted { value = parsed.value, count = count.value }
+
+Includes { text, needle } =>
+    emit Length { value = text } to core get size
+    emit Length { value = needle } to core get width
+    i = 0
+    loop
+        if i + width.value > size.value
+            break
+        if text[i, i + width.value) = needle
+            return Inclusion { yes = true }
+        i += 1
+    return Inclusion { yes = false }
+
+Spawns { command } =>
+    emit Ran to proc get record
+    found = []
+    loop one over record.items
+        if one.spawned and one.command = command, found += [one]
+    return SpawnList { items = found }
+
+| ---- Start: private directories, the instance lock, the key ----
+
+emit Respond { command = "id", arg = "", stdout = "1000\n", code = 0 } to proc
+emit Respond { command = "stat", arg = "", stdout = "directory:1000:700\n", code = 0 } to proc
+emit Respond { command = "pwd", arg = "", stdout = "/svc\n", code = 0 } to proc
+emit Respond { command = "sh", arg = "", stdout = "4242\n", code = 0 } to proc
+emit Respond { command = "uname", arg = "", stdout = "testhost\n", code = 0 } to proc
+emit Respond { command = "cat", arg = "", stdout = "", code = 1 } to proc
+emit StartService to this get started
+assert started ∈ ServiceStarted
+key = "aaaaaaaabbbbccccdddd00000000000111111111222233334444555555555555"
+emit Ran to proc get boot
+locked = false
+published = false
+loop one over boot.items
+    if one.spawned and one.command = "flock", locked = one.args[0, 3) = ["-n", "-E", "75"] and one.args[4, 6) = ["tail", "--pid=4242"]
+    if one.command = "install" and one.stdin = key, published = true
+assert locked
+assert published
+
+| A wrong uid or a group-readable directory refuses to start.
+emit Respond { command = "stat", arg = "", stdout = "directory:1001:700\n", code = 0 } to proc
+emit Configure to this get foreign
+assert foreign ∈ NotConfigured
+emit Respond { command = "stat", arg = "", stdout = "directory:1000:750\n", code = 0 } to proc
+emit Configure to this get shared
+assert shared ∈ NotConfigured
+emit Respond { command = "stat", arg = "", stdout = "directory:1000:700\n", code = 0 } to proc
+emit AllowedHost { url = "http://127.0.0.1:8923" } to this get loopback
+assert loopback.ok
+emit AllowedHost { url = "http://127.0.0.1:8923/evil" } to this get pathed
+assert not pathed.ok
+emit AllowedHost { url = "https://apps.codeloves.me.evil.test" } to this get lookalike
+assert not lookalike.ok
+
+| ---- Refusals before any session exists ----
+
+attach_body = "{\"client\":\"desktop\",\"approvals\":true}"
+emit Call { method = "POST", path = "/v1/attach", body = attach_body, bearer = key, extra = { origin = "https://evil.test" } } to this get browser
+assert browser.status = 403
+assert browser.value.error = "browser_refused"
+emit Call { method = "POST", path = "/v1/attach", body = attach_body, bearer = key, extra = { "sec-fetch-site" = "cross-site" } } to this get fetched
+assert fetched.status = 403
+emit Call { method = "POST", path = "/v1/attach", body = attach_body, bearer = key, extra = { host = "evil.test:40123" } } to this get rebound
+assert rebound.value.error = "host_refused"
+emit Call { method = "POST", path = "/v1/attach", body = attach_body, bearer = key, extra = { "x-mike-protocol" = "2" } } to this get newer
+assert newer.status = 426
+assert newer.value.supported = [1]
+emit Call { method = "POST", path = "/v1/attach", body = attach_body, bearer = "guess", extra = {} } to this get guessed
+assert guessed.status = 401
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = key, extra = {} } to this get key_as_session
+assert key_as_session.status = 401
+
+| ---- Two clients attach to one instance; each gets its own session ----
+
+emit Call { method = "POST", path = "/v1/attach", body = attach_body, bearer = key, extra = {} } to this get desktop
+assert desktop.status = 200
+assert desktop.value.state.connection = "signed_out"
+emit Call { method = "POST", path = "/v1/attach", body = "{\"client\":\"watcher\",\"approvals\":false}", bearer = key, extra = {} } to this get watcher
+assert watcher.status = 200
+assert watcher.value.session_token ≠ desktop.value.session_token
+desk = desktop.value.session_token
+watch = watcher.value.session_token
+assert watcher.value.state.clients = 2
+assert watcher.value.state.approval_clients = 1
+
+| Connecting pairs this computer once; the credential never reaches a client.
+emit Reply { body = "{\"_class\":\"Account\",\"email\":\"ada@example.test\",\"active\":true,\"verified\":true}" } to http
+emit Reply { body = "{\"_class\":\"DevicePaired\",\"device_id\":\"dev-1\",\"credential\":\"secret-credential\"}" } to http
+emit Reply { body = "{\"_class\":\"DefaultDeviceSet\",\"device_id\":\"dev-1\"}" } to http
+emit Reply { body = "{\"_class\":\"DeviceOnline\",\"device_id\":\"dev-1\",\"at\":1}" } to http
+emit Call { method = "POST", path = "/v1/attach", body = "{\"client\":\"desktop\",\"approvals\":true,\"connect\":\"auto\",\"token\":\"tok-ada\"}", bearer = key, extra = {} } to this get third
+assert third.status = 200
+assert third.value.state.account = "ada@example.test"
+assert third.value.state.connection = "connected"
+assert third.value.state.paired
+ada = third.value.session_token
+emit Stringify { value = third.value } to json get visible
+emit Includes { text = visible.value, needle = "secret-credential" } to this get credential_seen
+assert not credential_seen.yes
+emit Includes { text = visible.value, needle = "tok-ada" } to this get token_seen
+assert not token_seen.yes
+
+| ---- A task arrives; one approval-capable client claims it ----
+
+emit Reply { body = "{\"_class\":\"DeviceOnline\",\"device_id\":\"dev-1\",\"at\":2}" } to http
+emit Reply { body = "{\"_class\":\"TerminalStep\",\"id\":\"step-1\",\"argv\":[\"pwd\"],\"cwd\":\"/tmp\",\"device_id\":\"dev-1\"}" } to http
+emit ServiceTick to this
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = watch, extra = {} } to this get watched
+assert watched.value.work.id = "step-1"
+assert watched.value.work.approval_id = ""
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = desk, extra = {} } to this get shown
+approval = shown.value.work.approval_id
+assert approval ≠ ""
+assert shown.value.work.claim = "none"
+assert shown.value.work.argv = ["pwd"]
+emit Call { method = "POST", path = "/v1/approvals/claim", body = "{\"approval_id\":\"$approval\"}", bearer = watch, extra = {} } to this get watcher_claim
+assert watcher_claim.status = 403
+emit Call { method = "POST", path = "/v1/approvals/claim", body = "{\"approval_id\":\"$approval\"}", bearer = desk, extra = {} } to this get claimed
+assert claimed.status = 200
+emit Call { method = "POST", path = "/v1/approvals/answer", body = "{\"approval_id\":\"$approval\",\"decision\":\"approve\"}", bearer = ada, extra = {} } to this get cross_talk
+assert cross_talk.status = 409
+assert cross_talk.value.error = "claimed_elsewhere"
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = ada, extra = {} } to this get other_view
+assert other_view.value.work.claim = "other"
+
+| Closing the claiming window releases the claim; nothing runs or declines.
+emit Call { method = "POST", path = "/v1/detach", body = "{}", bearer = desk, extra = {} } to this get detached
+assert detached.status = 200
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = desk, extra = {} } to this get gone
+assert gone.status = 401
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = ada, extra = {} } to this get released
+assert released.value.work.claim = "none"
+assert released.value.work.stage = "awaiting_approval"
+emit Spawns { command = "/bin/sh" } to this get none_yet
+assert none_yet.items = []
+emit LastPost to this get before_answer
+assert before_answer.value.particle._class = "ClaimTask"
+
+| ---- The new claimant approves; the service runs the worker ----
+
+emit Call { method = "POST", path = "/v1/approvals/answer", body = "{\"approval_id\":\"$approval\",\"decision\":\"approve\"}", bearer = ada, extra = {} } to this get approved
+assert approved.status = 200
+assert approved.value.stage = "running"
+emit Spawns { command = "/bin/sh" } to this get workers
+emit Length { value = workers.items } to core get worker_count
+assert worker_count.value = 1
+assert workers.items[0].args[0] = "-c"
+assert workers.items[0].args[2] = "/svc/adapters/terminal_worker.py"
+emit Ran to proc get prepared
+request_text = ""
+loop one over prepared.items
+    if one.command = "install" and one.stdin ∈ String and one.args[2] ∉ Null
+        emit Includes { text = one.stdin, needle = "timeout_seconds" } to this get has_timeout
+        if has_timeout.yes, request_text = one.stdin
+assert request_text = "{\"argv\":[\"pwd\"],\"cwd\":\"/tmp\",\"timeout_seconds\":60}"
+emit Call { method = "POST", path = "/v1/approvals/answer", body = "{\"approval_id\":\"$approval\",\"decision\":\"approve\"}", bearer = ada, extra = {} } to this get again
+assert again.status = 409
+assert again.value.error = "already_decided"
+assert again.value.decision = "approve"
+emit Spawns { command = "/bin/sh" } to this get still_one
+emit Length { value = still_one.items } to core get still_count
+assert still_count.value = 1
+
+| Stop needs an approval-capable client and signals the worker with TERM.
+emit Call { method = "POST", path = "/v1/work/stop", body = "{\"work_id\":\"step-1\"}", bearer = watch, extra = {} } to this get watcher_stop
+assert watcher_stop.status = 403
+emit Call { method = "POST", path = "/v1/work/stop", body = "{\"work_id\":\"step-1\"}", bearer = ada, extra = {} } to this get stopping
+assert stopping.status = 200
+emit Ran to proc get signals
+termed = false
+loop one over signals.items
+    if one.command = "kill" and one.args[0] = "-TERM", termed = true
+assert termed
+
+| The worker's own JSON is what Mike receives, bounded, exactly once.
+emit Alive { alive = false, code = 0 } to proc
+emit Respond { command = "cat", arg = "--", stdout = "{\"state\":\"cancelled\"}", code = 0 } to proc
+emit Reply { body = "{\"_class\":\"TaskCompleted\",\"id\":\"step-1\",\"replayed\":false}" } to http
+emit WorkerTick { id = "step-1" } to this
+emit LastPost to this get reported
+assert reported.value.particle._class = "CompleteTerminalStep"
+assert reported.value.particle.id = "step-1"
+assert reported.value.particle.state = "cancelled"
+assert reported.value.particle.stderr = "stopped locally"
+assert reported.value.token = "tok-ada"
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = ada, extra = {} } to this get after_stop
+assert after_stop.value.work = null
+emit Length { value = after_stop.value.activity } to core get entries
+assert after_stop.value.activity[entries.value - 1].kind = "result"
+assert after_stop.value.activity[entries.value - 1].state = "cancelled"
+
+| Output is bounded before it leaves the machine.
+emit Bound { text = "x" } to this get small
+assert small.text = "x"
+long = ""
+loop
+    emit Length { value = long } to core get grown
+    if grown.value ≥ 5000, break
+    long += "0123456789"
+emit Bound { text = long } to this get bounded
+emit Length { value = bounded.text } to core get bounded_size
+assert bounded_size.value = 4019
+
+| ---- No approval-capable client: the task waits, then reports it did not run ----
+
+emit Respond { command = "cat", arg = "--", stdout = "", code = 1 } to proc
+emit Call { method = "POST", path = "/v1/detach", body = "{}", bearer = ada, extra = {} } to this
+emit Reply { body = "{\"_class\":\"DeviceOnline\",\"device_id\":\"dev-1\",\"at\":3}" } to http
+emit Reply { body = "{\"_class\":\"TerminalStep\",\"id\":\"step-2\",\"argv\":[\"rm\",\"-rf\",\"/tmp/x\"],\"cwd\":\"/tmp\",\"device_id\":\"dev-1\"}" } to http
+emit ServiceTick to this
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = watch, extra = {} } to this get unattended
+assert unattended.value.work.id = "step-2"
+assert unattended.value.approval_clients = 0
+emit Timestamp to core get later
+emit AdvanceWork { now = later.value + 100 } to this
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = watch, extra = {} } to this get still_waiting
+assert still_waiting.value.work.stage = "awaiting_approval"
+emit Reply { body = "{\"_class\":\"TaskCompleted\",\"id\":\"step-2\",\"replayed\":false}" } to http
+emit AdvanceWork { now = later.value + 300 } to this
+emit LastPost to this get expired
+assert expired.value.particle.id = "step-2"
+assert expired.value.particle.state = "cancelled"
+emit Spawns { command = "/bin/sh" } to this get never_ran
+emit Length { value = never_ran.items } to core get never_count
+assert never_count.value = 1
+
+| ---- Chat turns belong to the session that started them ----
+
+emit Call { method = "POST", path = "/v1/attach", body = attach_body, bearer = key, extra = {} } to this get asker
+asker_token = asker.value.session_token
+emit Reply { body = "{\"_class\":\"Thinking\",\"turn_id\":\"turn-1\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/ask", body = "{\"text\":\"hello\"}", bearer = asker_token, extra = {} } to this get asked
+assert asked.value.turn_id = "turn-1"
+emit Call { method = "POST", path = "/v1/chat/progress", body = "{\"turn_id\":\"turn-1\"}", bearer = watch, extra = {} } to this get peeked
+assert peeked.status = 404
+emit Reply { body = "{\"_class\":\"Turn\",\"stage\":\"done\",\"reply\":\"Hi\",\"pending\":null}" } to http
+emit Call { method = "POST", path = "/v1/chat/progress", body = "{\"turn_id\":\"turn-1\"}", bearer = asker_token, extra = {} } to this get progress
+assert progress.value.reply = "Hi"
+
+| ---- Account change: the old owner's running command is stopped and
+| reported with the old owner's credentials; every session must re-attach ----
+
+emit Reply { body = "{\"_class\":\"DeviceOnline\",\"device_id\":\"dev-1\",\"at\":4}" } to http
+emit Reply { body = "{\"_class\":\"TerminalStep\",\"id\":\"step-3\",\"argv\":[\"sleep\",\"30\"],\"cwd\":\"/tmp\",\"device_id\":\"dev-1\"}" } to http
+emit ServiceTick to this
+emit Alive { alive = true, code = null } to proc
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = asker_token, extra = {} } to this get third_task
+third_approval = third_task.value.work.approval_id
+emit Call { method = "POST", path = "/v1/approvals/answer", body = "{\"approval_id\":\"$third_approval\",\"decision\":\"approve\"}", bearer = asker_token, extra = {} } to this get sleeping
+assert sleeping.value.stage = "running"
+emit Reply { body = "{\"_class\":\"Account\",\"email\":\"bob@example.test\",\"active\":true,\"verified\":true}" } to http
+emit Call { method = "POST", path = "/v1/attach", body = "{\"client\":\"cli\",\"approvals\":true,\"connect\":\"auto\",\"token\":\"tok-bob\"}", bearer = key, extra = {} } to this get mismatch
+assert mismatch.status = 409
+assert mismatch.value.error = "account_mismatch"
+emit Reply { body = "{\"_class\":\"Account\",\"email\":\"bob@example.test\",\"active\":true,\"verified\":true}" } to http
+emit Reply { body = "{\"_class\":\"TaskCompleted\",\"id\":\"step-3\",\"replayed\":false}" } to http
+emit Reply { body = "{\"_class\":\"DevicePaired\",\"device_id\":\"dev-2\",\"credential\":\"bob-credential\"}" } to http
+emit Reply { body = "{\"_class\":\"DefaultDeviceSet\",\"device_id\":\"dev-2\"}" } to http
+emit Reply { body = "{\"_class\":\"DeviceOnline\",\"device_id\":\"dev-2\",\"at\":5}" } to http
+emit Call { method = "POST", path = "/v1/attach", body = "{\"client\":\"desktop\",\"approvals\":true,\"connect\":\"switch\",\"token\":\"tok-bob\"}", bearer = key, extra = {} } to this get switched
+assert switched.status = 200
+assert switched.value.state.account = "bob@example.test"
+assert switched.value.state.activity = []
+assert switched.value.state.work = null
+emit Posted to http get switch_posts
+cancelled_for_ada = false
+loop one over switch_posts.items
+    emit Parse { text = one.body } to json get sent
+    if sent.value.particle._class = "CompleteTerminalStep" and sent.value.particle.id = "step-3"
+        cancelled_for_ada = sent.value.token = "tok-ada" and sent.value.particle.credential = "secret-credential" and sent.value.particle.state = "cancelled"
+assert cancelled_for_ada
+emit Ran to proc get killed
+forced = false
+loop one over killed.items
+    if one.command = "<kill>", forced = true
+assert forced
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = asker_token, extra = {} } to this get stale
+assert stale.status = 409
+assert stale.value.error = "session_ended"
+assert stale.value.reason = "account_changed"
+emit Call { method = "POST", path = "/v1/chat/progress", body = "{\"turn_id\":\"turn-1\"}", bearer = switched.value.session_token, extra = {} } to this get old_turn
+assert old_turn.status = 404
+
+| ---- Revocation: work stops, the pairing is forgotten, re-pairing is explicit ----
+
+bob = switched.value.session_token
+emit Alive { alive = false, code = 0 } to proc
+emit Reply { body = "{\"_class\":\"Forbidden\",\"reason\":\"device credentials were refused\"}" } to http
+emit ServiceTick to this
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = bob, extra = {} } to this get revoked_view
+assert revoked_view.value.error = "session_ended"
+assert revoked_view.value.reason = "device_revoked"
+emit Ran to proc get forgot
+removed = false
+loop one over forgot.items
+    if one.command = "rm" and one.args[0] = "-f"
+        emit Includes { text = "$one.args", needle = "/credential" } to this get mentions
+        if mentions.yes, removed = true
+assert removed
+emit Reply { body = "{\"_class\":\"Account\",\"email\":\"bob@example.test\",\"active\":true,\"verified\":true}" } to http
+emit Call { method = "POST", path = "/v1/attach", body = "{\"client\":\"desktop\",\"approvals\":true,\"connect\":\"auto\",\"token\":\"tok-bob\"}", bearer = key, extra = {} } to this get latched
+assert latched.status = 409
+assert latched.value.error = "connect_required"
+
+| ---- Explicit sign-out ends the generation for every client ----
+
+emit Call { method = "POST", path = "/v1/attach", body = attach_body, bearer = key, extra = {} } to this get last
+emit Call { method = "POST", path = "/v1/signout", body = "{}", bearer = last.value.session_token, extra = {} } to this get signed_out
+assert signed_out.value.signed_out
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = last.value.session_token, extra = {} } to this get after_signout
+assert after_signout.value.reason = "signed_out"

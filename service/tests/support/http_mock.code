@@ -1,0 +1,31 @@
+| A stand-in for `http_client`: nothing leaves the machine. Each Post is
+| recorded and answered with the next queued body (200), or 503 when the
+| queue is empty — which the service reads as the gateway being unreachable.
+|
+| Test-only handlers:
+|   Reply { body } => queue one 200 answer
+|   Posted => Posts { items = [{ url, body }] }
+|   Forget => clears the record and the queue
+
+posted = []
+replies = []
+
+Post { url, body } =>
+    posted += [{ url = url, body = body }]
+    if replies = []
+        return HttpResponse { ok = true, status = 503, body = "" }
+    answer = replies[0]
+    replies = replies (0, length)
+    return HttpResponse { ok = true, status = 200, body = answer }
+
+Reply { body } =>
+    replies += [body]
+    return Replying
+
+Posted =>
+    return Posts { items = posted }
+
+Forget =>
+    posted = []
+    replies = []
+    return Forgotten

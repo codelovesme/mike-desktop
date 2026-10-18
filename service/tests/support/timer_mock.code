@@ -1,0 +1,15 @@
+| A stand-in for `timer`: a delay is recorded and never fires, so a fixture
+| drives every tick itself.
+
+armed = []
+
+Delay { ms, then } =>
+    armed += [then]
+    emit Length { value = armed } to core get count
+    return DelayResult { value = count.value }
+
+Cancel { id } =>
+    return CancelResult { ok = false }
+
+Armed =>
+    return Delays { items = armed }

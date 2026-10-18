@@ -1,23 +1,37 @@
 #!/usr/bin/python3
-"""Use the real GTK confirmation dialog and worker for a terminal step."""
+"""Drive the real GTK window, as a client of a real scratch Mike service.
 
-import os
+Run under Xvfb (and a private D-Bus) with a disposable account. The window
+gets a browser handoff, the service pairs, a terminal step arrives through
+the gateway and the native dialog is answered. Modes (env, one at a time):
+
+  (none)                approve pwd; activity shows its output
+  MIKE_TEST_DECLINE=1   decline; nothing runs
+  MIKE_TEST_STOP=1      Stop ends a running command
+  MIKE_TEST_SIGNOUT=1   Sign out stops it and signs the service out
+  MIKE_TEST_WEB_SIGNOUT=1  signing out in the page does the same
+  MIKE_TEST_SWITCH=1    a handoff to a second account (E2E_SECOND_*) isolates it
+  MIKE_TEST_REVOKE=1    website revocation stops it and returns to welcome
+  MIKE_TEST_CLOSE=1     closing the window leaves the service running: the
+                        approved command finishes, a new step waits unrun,
+                        and a reopened window presents and runs it
+"""
+
 import importlib.util
-import json
+import os
 from pathlib import Path
 import sys
+import tempfile
+import time
 
-e2e_spec = importlib.util.spec_from_file_location("terminal_e2e", Path(__file__).with_name("terminal-e2e.py"))
+e2e_spec = importlib.util.spec_from_file_location("service_e2e", Path(__file__).with_name("service-e2e.py"))
 e2e = importlib.util.module_from_spec(e2e_spec)
 e2e_spec.loader.exec_module(e2e)
-api, EMAIL, PASSWORD = e2e.api, e2e.EMAIL, e2e.PASSWORD
+api = e2e.api
 
 ROOT = Path(os.environ.get("E2E_DESKTOP_DIR", Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(ROOT / "ui"))
-from desktop_webview import GLib, Gtk, MikeWindow  # noqa: E402
-
-CODE = os.environ.get("CODE_BIN", "/home/cdlvsm/git/codelovesme/code/target/release/code")
 HOST = os.environ.get("EUGLENA_HOST_URL", "http://127.0.0.1:8923").rstrip("/")
+EMAIL, PASSWORD = os.environ.get("E2E_EMAIL", ""), os.environ.get("E2E_PASSWORD", "")
 DECLINE = os.environ.get("MIKE_TEST_DECLINE") == "1"
 STOP = os.environ.get("MIKE_TEST_STOP") == "1"
 SIGNOUT = os.environ.get("MIKE_TEST_SIGNOUT") == "1"
@@ -25,52 +39,68 @@ WEB_SIGNOUT = os.environ.get("MIKE_TEST_WEB_SIGNOUT") == "1"
 SWITCH = os.environ.get("MIKE_TEST_SWITCH") == "1"
 REVOKE = os.environ.get("MIKE_TEST_REVOKE") == "1"
 CLOSE = os.environ.get("MIKE_TEST_CLOSE") == "1"
+LONG = STOP or SIGNOUT or WEB_SIGNOUT or SWITCH or REVOKE
 
 
 def main():
     if not EMAIL or not PASSWORD:
         raise SystemExit("Set E2E_EMAIL and E2E_PASSWORD")
-    signed = api("auth", {"_class": "Authenticate", "email": EMAIL, "password": PASSWORD})
-    assert signed["_class"] == "SignedIn", signed
-    token = signed["token"]
-    second_token = ""
+    token = e2e.Run.sign_in(EMAIL, PASSWORD)
     second_email = os.environ.get("E2E_SECOND_EMAIL", "")
-    if SWITCH:
-        assert second_email and os.environ.get("E2E_SECOND_PASSWORD"), "set second test account"
-        second = api("auth", {"_class": "Authenticate", "email": second_email,
-                              "password": os.environ["E2E_SECOND_PASSWORD"]})
-        assert second["_class"] == "SignedIn", second
-        second_token = second["token"]
-    before = api("mike-interface", {"_class": "MyDevices"}, token)
-    known = {item["device_id"] for item in before.get("items", [])}
-    window = MikeWindow(ROOT, CODE, HOST)
-    result = {"handoff": False, "sent": False, "accepted": False, "stopped": False,
-              "step": "", "device": "", "error": "", "sessions": []}
-    original_bridge = window.async_bridge
+    second_token = e2e.Run.sign_in(second_email, os.environ["E2E_SECOND_PASSWORD"]) if SWITCH else ""
+    known = e2e.Run.devices(token)
+    area = Path(tempfile.mkdtemp(prefix="mike-ui-smoke-"))
+    service = e2e.Service(area)
+    os.environ.update(MIKE_SERVICE_STATE_DIR=service.env["MIKE_SERVICE_STATE_DIR"],
+                      MIKE_SERVICE_RUNTIME_DIR=service.env["MIKE_SERVICE_RUNTIME_DIR"])
+    service.start()
+    sys.path.insert(0, str(ROOT / "ui"))
+    from desktop_webview import GLib, Gtk, MikeWindow, activity_text  # noqa: E402
 
-    def traced_bridge(path, payload, done):
-        if path == "/session":
-            result["sessions"].append("expected" if payload.get("token") == token else "other")
-        return original_bridge(path, payload, done)
+    window = MikeWindow(ROOT, HOST)
+    result = {"handoff": False, "sent": False, "accepted": 0, "stopped": False, "step": "", "device": "",
+              "error": "", "connects": [], "closed_step": "", "reopened": None, "phase": "first"}
+    original = window.service_call
 
-    window.async_bridge = traced_bridge
+    def traced(action, payload, done):
+        if action == "attach" and payload and payload.get("token"):
+            result["connects"].append((payload.get("connect"), "expected" if payload["token"] == token else "other"))
+        return original(action, payload, done)
 
-    def approve():
+    window.service_call = traced
+
+    def answer_dialogs():
         for top in Gtk.Window.list_toplevels():
             if isinstance(top, Gtk.MessageDialog) and top.get_visible():
-                result["accepted"] = True
+                result["accepted"] += 1
                 top.response(Gtk.ResponseType.NO if DECLINE else Gtk.ResponseType.YES)
-        return not result["accepted"]
+        return not result["error"] and result["phase"] != "done"
+
+    def local_state():
+        client = e2e.MikeService("smoke-observer", approvals=False, directory=service.run_dir)
+        try:
+            return client.attach()
+        finally:
+            client.detach()
+
+    def finish(message):
+        print("PASS: " + message)
+        result["phase"] = "done"
+        if result["reopened"] is not None:
+            result["reopened"].close()
+        else:
+            window.close()
+        return False
 
     def tick():
         try:
-            if window.port is None:
+            if not window.attached:
                 return True
             if not result["handoff"]:
                 result["handoff"] = True
                 window.accept_handoff(token)
                 return True
-            if window.current_token != token and not ((SIGNOUT or WEB_SIGNOUT or SWITCH) and result["stopped"]):
+            if window.current_token != token and not ((SIGNOUT or WEB_SIGNOUT or SWITCH or REVOKE) and result["stopped"]):
                 return True
             if window.inserting_token:
                 return True
@@ -80,135 +110,141 @@ def main():
                 if not new or not new[0]["online"] or "terminal" not in new[0]["capabilities"]:
                     return True
                 result["device"] = new[0]["device_id"]
-                started = api("mike-interface", {"_class": "RunTerminalStep", "argv": ["sleep", "30"] if STOP or SIGNOUT or WEB_SIGNOUT or SWITCH or REVOKE or CLOSE else ["pwd"],
-                                                   "cwd": "/tmp", "device_id": result["device"]}, token)
+                argv = ["sleep", "24.159"] if LONG else (["sh", "-c", "sleep 3; echo after-close"] if CLOSE else ["pwd"])
+                started = api("mike-interface", {"_class": "RunTerminalStep", "argv": argv, "cwd": "/tmp", "device_id": result["device"]}, token)
                 assert started["_class"] == "InvocationAccepted", started
                 result["step"] = started["id"]
                 result["sent"] = True
-                GLib.timeout_add(100, approve)
                 return True
-            if STOP and window.terminal_worker is not None and not result["stopped"]:
+            running = bool(window.running_work)
+            if LONG and running and not result["stopped"]:
                 result["stopped"] = True
-                window.stop_terminal()
-            if SIGNOUT and window.terminal_worker is not None and not result["stopped"]:
+                if STOP:
+                    window.stop_terminal()
+                if SIGNOUT:
+                    window.sign_out_button.clicked()
+                if WEB_SIGNOUT:
+                    window.web.run_javascript(
+                        "(() => { const profile = document.querySelector('.profile-button'); "
+                        "if (!profile) return 'no-profile'; profile.click(); let attempts = 0; "
+                        "const timer = setInterval(() => { const signout = document.querySelector('.profile-menu-button.danger'); "
+                        "if (signout) { clearInterval(timer); signout.click(); } "
+                        "if (++attempts > 50) clearInterval(timer); }, 100); return 'profile-opened'; })()",
+                        None, None,
+                    )
+                if SWITCH:
+                    window.accept_handoff(second_token)
+                if REVOKE:
+                    revoked = api("mike-interface", {"_class": "RevokeDevice", "device_id": result["device"]}, token)
+                    assert revoked["_class"] == "DeviceRevoked", revoked
+                return True
+            if CLOSE and running and not result["stopped"]:
                 result["stopped"] = True
-                window.sign_out_button.clicked()
-            if WEB_SIGNOUT and window.terminal_worker is not None and not result["stopped"]:
-                result["stopped"] = True
-                window.web.run_javascript(
-                    "(() => { const profile = document.querySelector('.profile-button'); "
-                    "if (!profile) return 'no-profile'; profile.click(); let attempts = 0; "
-                    "const timer = setInterval(() => { const signout = document.querySelector('.profile-menu-button.danger'); "
-                    "if (signout) { clearInterval(timer); signout.click(); } "
-                    "if (++attempts > 50) clearInterval(timer); }, 100); return 'profile-opened'; })()",
-                    None, None,
-                )
-            if SWITCH and window.terminal_worker is not None and not result["stopped"]:
-                result["stopped"] = True
-                window.accept_handoff(second_token)
-            if REVOKE and window.terminal_worker is not None and not result["stopped"]:
-                result["stopped"] = True
-                revoked = api("mike-interface", {"_class": "RevokeDevice", "device_id": result["device"]}, token)
-                assert revoked["_class"] == "DeviceRevoked", revoked
-            if CLOSE and window.terminal_worker is not None and not result["stopped"]:
-                result["stopped"] = True
-                worker = window.terminal_worker
                 window.close()
-                worker.wait(timeout=4)
-                assert worker.poll() is not None, "worker survived window close"
                 return False
             progress = api("mike-interface", {"_class": "InvocationProgress", "id": result["step"]}, token)
-            if progress.get("state") == "completed":
-                assert result["accepted"], "the native dialog was not approved: " + str(progress) + " sessions=" + str(result["sessions"])
-                if SIGNOUT or WEB_SIGNOUT:
-                    assert result["stopped"] and window.current_token == "", "sign-out did not reach the native controller"
-                    assert window.activity_log == "", "old output remained visible after sign-out"
-                    assert progress["result"]["state"] == "cancelled", progress
-                    assert window.terminal_worker is None or window.terminal_worker.poll() is not None, "worker survived sign-out"
-                    local = json.loads(window.bridge("/state")[1])
-                    if local["connection"] != "sign in":
-                        return True
-                    assert local["connection"] == "sign in" and local["task_id"] == "", local
-                    print("PASS: " + ("web" if WEB_SIGNOUT else "native") + " sign-out stopped the worker and Mike received cancellation")
-                    window.close()
-                    return False
-                if SWITCH:
-                    assert result["stopped"] and progress["result"]["state"] == "cancelled", progress
-                    if window.current_token != second_token:
-                        return True
-                    local = json.loads(window.bridge("/state")[1])
-                    assert local["connection"] == "connected" and local["owner"] == second_email, local
-                    assert window.activity_log == "", "old account activity remained visible"
-                    foreign = api("mike-interface", {"_class": "InvocationProgress", "id": result["step"]}, second_token)
-                    assert foreign["_class"] == "Unknown", foreign
-                    assert window.terminal_worker is None or window.terminal_worker.poll() is not None
-                    print("PASS: switching accounts stopped the old command and isolated its result")
-                    window.close()
-                    return False
-                if REVOKE:
-                    assert result["stopped"] and progress["result"]["state"] == "unknown", progress
-                    local = json.loads(window.bridge("/state")[1])
-                    if local["connection"] != "revoked" or window.terminal_worker is not None and window.terminal_worker.poll() is None:
-                        return True
-                    assert window.activity_log == "", "revoked account activity remained visible"
-                    refused = api("mike-interface", {"_class": "RunTerminalStep", "argv": ["pwd"],
-                                                       "cwd": "/tmp", "device_id": result["device"]}, token)
-                    assert refused["_class"] != "InvocationAccepted", refused
-                    print("PASS: revocation stopped the command and barred later steps")
-                    window.close()
-                    return False
-                if STOP:
-                    assert result["stopped"], "worker finished before Stop"
-                    assert progress["result"]["state"] == "cancelled", progress
-                    print("PASS: GTK approved sleep, Stop ended the worker, and Mike received cancellation")
-                    window.close()
-                    return False
-                if DECLINE:
-                    assert progress["result"]["state"] == "denied", progress
-                    assert window.terminal_worker is None, "a denied command started a worker"
-                    print("PASS: GTK declined the command and no local worker ran")
-                    window.close()
-                    return False
-                assert progress["result"]["state"] == "completed", str(progress) + " sessions=" + str(result["sessions"])
-                assert progress["result"]["stdout"].strip() == "/tmp", progress
-                if "Result: completed" not in window.activity_log:
+            if progress.get("state") != "completed":
+                return True
+            outcome = progress["result"]
+            assert result["accepted"], "the native dialog was not answered: " + str(progress) + " connects=" + str(result["connects"])
+            local = local_state()
+            if SIGNOUT or WEB_SIGNOUT:
+                assert outcome["state"] == "cancelled", progress
+                if local["connection"] != "signed_out" or window.activity_seen:
                     return True
-                assert "Requested: pwd" in window.activity_log and "stdout:\n/tmp" in window.activity_log
-                print("PASS: GTK asked for approval, the local worker ran pwd, and the gateway received output")
-                window.close()
-                return False
+                assert window.current_token == "" and window.require_handoff
+                return finish(("web" if WEB_SIGNOUT else "native") + " sign-out stopped the command in the service, Mike received cancellation, the service signed out")
+            if SWITCH:
+                assert outcome["state"] == "cancelled", progress
+                if window.current_token != second_token or local["account"] != second_email:
+                    return True
+                assert not window.activity_seen, "old account activity remained visible"
+                foreign = api("mike-interface", {"_class": "InvocationProgress", "id": result["step"]}, second_token)
+                assert foreign["_class"] == "Unknown", foreign
+                return finish("switching accounts stopped the old command and isolated its result")
+            if REVOKE:
+                assert outcome["state"] == "unknown", progress
+                if local["connection"] != "revoked" or window.current_token:
+                    return True
+                assert not window.activity_seen, "revoked account activity remained visible"
+                refused = api("mike-interface", {"_class": "RunTerminalStep", "argv": ["pwd"], "cwd": "/tmp", "device_id": result["device"]}, token)
+                assert refused["_class"] != "InvocationAccepted", refused
+                return finish("revocation stopped the command, the window returned to welcome, later steps are barred")
+            if STOP:
+                assert outcome["state"] == "cancelled", progress
+                return finish("GTK approved the command, Stop ended it in the service, Mike received cancellation")
+            if DECLINE:
+                assert outcome["state"] == "denied", progress
+                return finish("GTK declined the command and nothing ran")
+            assert outcome["state"] == "completed" and outcome["stdout"].strip() == "/tmp", progress
+            text = activity_text(window.activity_seen)
+            if "Result: completed" not in text:
+                return True
+            assert "Requested: pwd" in text and "stdout:\n/tmp" in text, text
+            return finish("GTK asked for approval, the service ran pwd, the gateway received output, activity shows it")
         except Exception as error:
-            result["error"] = str(error)
+            result["error"] = repr(error)
             window.close()
             return False
-        return True
+
+    def after_close():
+        """The window is gone (its main loop ended); the service is not."""
+        assert e2e.mike_service.reachable(service.run_dir), "closing the window stopped the service"
+        done = e2e.until("the approved command after close",
+                         lambda: (lambda p: p if p.get("state") == "completed" else None)(
+                             api("mike-interface", {"_class": "InvocationProgress", "id": result["step"]}, token)), 20)
+        assert done["result"]["state"] == "completed" and done["result"]["stdout"] == "after-close\n", done
+        marker = area / "while-closed"
+        started = api("mike-interface", {"_class": "RunTerminalStep", "argv": ["touch", str(marker)], "cwd": "/tmp",
+                                         "device_id": result["device"]}, token)
+        result["closed_step"] = started["id"]
+        e2e.until("the step to be claimed with no window", lambda: (local_state().get("work") or {}).get("id") == started["id"], 20)
+        time.sleep(5)
+        listed = api("mike-interface", {"_class": "MyDevices"}, token)
+        assert [one for one in listed["items"] if one["device_id"] == result["device"]][0]["online"], "presence lapsed"
+        assert not marker.exists(), "a step ran while no window was open"
+        assert api("mike-interface", {"_class": "InvocationProgress", "id": result["closed_step"]}, token)["state"] == "pending"
+        reopened = MikeWindow(ROOT, HOST)
+        result["reopened"] = reopened
+        result["accepted"] = 0
+
+        def check():
+            try:
+                if result["phase"] == "done":
+                    return False
+                progress = api("mike-interface", {"_class": "InvocationProgress", "id": result["closed_step"]}, token)
+                if progress.get("state") != "completed":
+                    return True
+                assert result["accepted"] == 1 and marker.exists() and progress["result"]["state"] == "completed", progress
+                return finish("closing the window kept the service: the approved command finished, a new step waited "
+                              "unrun while closed (presence online), and the reopened window presented it and it ran")
+            except Exception as error:
+                result["error"] = repr(error)
+                reopened.close()
+                return False
+
+        GLib.timeout_add_seconds(1, check)
+        Gtk.main()
 
     def timeout():
-        try:
-            state = window.bridge("/state")[1]
-            observed = json.loads(state)
-            diagnostic = {key: observed.get(key) for key in ("connection", "mode", "task_id")}
-        except Exception as error:
-            diagnostic = str(error)
-        progress = api("mike-interface", {"_class": "InvocationProgress", "id": result["step"]}, token) if result["step"] else {}
-        result["error"] = "timed out waiting for terminal UI flow: " + str(result) + " / " + str(diagnostic) + " / progress=" + str(progress)[:300] + " / native_session=" + str(bool(window.current_token)) + " inserting=" + str(window.inserting_token) + " worker=" + str(window.terminal_worker is not None)
-        window.close()
+        result["error"] = "timed out: " + str({k: v for k, v in result.items() if k != "reopened"})
+        (result["reopened"] or window).close()
         return False
 
+    GLib.timeout_add(100, answer_dialogs)
     GLib.timeout_add_seconds(1, tick)
-    GLib.timeout_add_seconds(35, timeout)
-    Gtk.main()
-    if result["device"]:
-        api("mike-interface", {"_class": "RevokeDevice", "device_id": result["device"]}, token)
-        if CLOSE:
-            progress = api("mike-interface", {"_class": "InvocationProgress", "id": result["step"]}, token)
-            assert result["stopped"] and progress["state"] == "completed" and progress["result"]["state"] in ("cancelled", "unknown"), progress
-            print("PASS: closing Mike stopped the worker and exposed a cancelled or unknown remote outcome")
-    if SWITCH:
-        devices = api("mike-interface", {"_class": "MyDevices"}, second_token)
-        for device in devices.get("items", []):
-            if device.get("active"):
-                api("mike-interface", {"_class": "RevokeDevice", "device_id": device["device_id"]}, second_token)
+    GLib.timeout_add_seconds(60, timeout)
+    try:
+        Gtk.main()
+        if CLOSE and result["stopped"] and not result["error"]:
+            after_close()
+    finally:
+        for one in e2e.Run.devices(token) - known:
+            api("mike-interface", {"_class": "RevokeDevice", "device_id": one}, token)
+        if SWITCH:
+            for one in e2e.Run.devices(second_token):
+                api("mike-interface", {"_class": "RevokeDevice", "device_id": one}, second_token)
+        service.stop()
     if result["error"]:
         raise SystemExit(result["error"])
 

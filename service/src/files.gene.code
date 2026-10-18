@@ -1,5 +1,6 @@
-| Local file workflow. The root and query are supplied by the person in the
-| desktop window. A remote task is only an invitation to start this workflow.
+| Local file workflow. The root and query are supplied by the person through
+| the approving local client (the Desktop's OS folder picker). A remote task
+| is only an invitation to start this workflow.
 
 FindLocalFile { root, query } =>
     if root ∉ String or query ∉ String
@@ -27,8 +28,10 @@ FindLocalFile { root, query } =>
     return FileFound { path = path }
 
 | This handler is called only after a fresh local confirmation of the exact
-| path. It does not accept a server-supplied path.
-OpenLocalFile { path, root } =>
+| path. It does not accept a server-supplied path. The opener can wait on the
+| portal for minutes, so it runs as a tracked child (companion.gene.code
+| collects its exit) rather than blocking every local client.
+BeginOpenFile { path, root, id, adapters } =>
     if path ∉ String or path = ""
         return FileRefused { reason = "no file was selected" }
     emit FileInChosenFolder { path = path, root = root } to this get scope
@@ -36,10 +39,10 @@ OpenLocalFile { path, root } =>
         return FileRefused { reason = "the file changed or left the chosen folder" }
     | Pass the verified descriptor to the document portal. A pathname swap
     | after the review cannot redirect the file it receives.
-    emit Run { command = "/usr/bin/python3", args = ["ui/secure_open.py", root, path] } to proc get opened
-    if opened ∈ Exception or not opened.success
+    emit Spawn { id = id, command = "/usr/bin/python3", args = [adapters + "/secure_open.py", root, path], cwd = adapters } to proc get opened
+    if opened ∈ Exception
         return FileRefused { reason = "the document portal could not open the reviewed file" }
-    return FileOpened { path = path }
+    return FileOpening { id = opened.id, pid = opened.pid }
 
 | Recheck the chosen folder and exact candidate immediately before opening.
 | `find -P` avoids following links while searching; this check also rejects a

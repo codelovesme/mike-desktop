@@ -1,0 +1,5 @@
+| Start once. A refused start (another instance, a shared directory, no
+| loopback listener) ends the program with a failure systemd reports.
+emit StartService to this get started
+assert started ∈ ServiceStarted
+emit Delay { ms = 500, then = "ServiceTick" } to clock

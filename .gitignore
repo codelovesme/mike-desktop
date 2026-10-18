@@ -1,6 +1,7 @@
 # Installed module binaries. The lockfile beside them pins what they are,
 # so a checkout can reproduce them with `code install`.
 .code/modules/
+service/.code/modules/
 main.code
 .env
 
@@ -8,3 +9,4 @@ main.code
 build/
 dist/
 tests/support/*.so
+service/tests/support/*.so

@@ -1,8 +1,10 @@
 #!/usr/bin/python3
-"""Check the real WebKit window accepts a browser handoff and pairs Euglena.
+"""Check the real WebKit window accepts a browser handoff and the shared
+service pairs this computer.
 
-Run under Xvfb with a disposable verified account. Set MIKE_SCREENSHOT_PATH
-to save the resulting signed-in window.
+Run under Xvfb with a disposable verified account; the window attaches to a
+real scratch Mike service. Set MIKE_SCREENSHOT_PATH to save the resulting
+signed-in window.
 """
 
 import json
@@ -17,13 +19,10 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 ROOT = Path(os.environ.get("E2E_DESKTOP_DIR", Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(ROOT / "ui"))
-from desktop_webview import GLib, Gtk, MikeWindow  # noqa: E402
 
 HOST = os.environ.get("MIKE_DESKTOP_HOST_URL", "http://127.0.0.1:8923").rstrip("/")
 EMAIL = os.environ.get("E2E_EMAIL", "")
 PASSWORD = os.environ.get("E2E_PASSWORD", "")
-CODE = os.environ.get("CODE_BIN", "/home/cdlvsm/git/codelovesme/code/target/release/code")
 
 
 def main():
@@ -36,7 +35,19 @@ def main():
         signed = json.load(response)
     assert signed["_class"] == "SignedIn", signed
     token = signed["token"]
-    window = MikeWindow(ROOT, CODE, HOST)
+    import importlib.util
+    import tempfile
+    spec = importlib.util.spec_from_file_location("service_e2e", Path(__file__).with_name("service-e2e.py"))
+    e2e = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(e2e)
+    service = e2e.Service(Path(tempfile.mkdtemp(prefix="mike-webview-smoke-")))
+    os.environ.update(MIKE_SERVICE_STATE_DIR=service.env["MIKE_SERVICE_STATE_DIR"],
+                      MIKE_SERVICE_RUNTIME_DIR=service.env["MIKE_SERVICE_RUNTIME_DIR"])
+    known = e2e.Run.devices(token)
+    service.start()
+    sys.path.insert(0, str(ROOT / "ui"))
+    from desktop_webview import GLib, Gtk, MikeWindow  # noqa: E402
+    window = MikeWindow(ROOT, HOST)
     state = secrets.token_urlsafe(32)
     window.connect_state = state
     result = {"status": 0, "error": ""}
@@ -66,14 +77,15 @@ def main():
             assert result["status"] == 200, result
             assert not result["error"], result
             assert window.stack.get_visible_child_name() == "conversation", "conversation did not open"
-            status, body = window.bridge("/state")
-            state = json.loads(body)
-            assert status == 200 and state["connection"] == "connected", state
-            assert state["owner"] == EMAIL, "paired under the wrong account"
+            observer = e2e.MikeService("smoke-observer", approvals=False, directory=service.run_dir)
+            state = observer.attach()
+            observer.detach()
+            assert state["connection"] == "connected" and state["paired"], state
+            assert state["account"] == EMAIL, "paired under the wrong account"
             shot = os.environ.get("MIKE_SCREENSHOT_PATH")
             if shot:
                 subprocess.run(["xwd", "-name", "Mike", "-silent", "-out", shot], check=True)
-            print("PASS: browser callback connected the WebKit window and native Euglena companion")
+            print("PASS: browser callback connected the WebKit window, and the shared service paired this computer")
         except Exception as error:
             print("FAIL:", str(error), file=sys.stderr)
             result["error"] = str(error)
@@ -82,7 +94,12 @@ def main():
         return False
 
     GLib.timeout_add_seconds(9, verify)
-    Gtk.main()
+    try:
+        Gtk.main()
+    finally:
+        service.stop()
+        for one in e2e.Run.devices(token) - known:
+            e2e.api("mike-interface", {"_class": "RevokeDevice", "device_id": one}, token)
     if result["error"]:
         raise SystemExit(1)
 

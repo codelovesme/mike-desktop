@@ -72,7 +72,7 @@ class PortalIpcTest(unittest.TestCase):
             try:
                 self.assertTrue(ready.wait(5), "fake portal did not acquire the bus name")
                 result = subprocess.run(
-                    ["/usr/bin/python3", str(ROOT / "ui/secure_open.py"), str(folder), str(candidate)],
+                    ["/usr/bin/python3", str(ROOT / "service/adapters/secure_open.py"), str(folder), str(candidate)],
                     capture_output=True, text=True, timeout=15,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)

@@ -99,26 +99,6 @@
         "Cancel"
       ],
       "global": false
-    },
-    "window": {
-      "name": "window",
-      "version": "2.12.1",
-      "source": "https://github.com/codelovesme/code/releases/tag/v2.12.1",
-      "asset": "window-linux-x86_64.so",
-      "sha256": "5d725aeba9ee9a676b9377464f4e9ec16484567afa6dbc42c510f9593528205c",
-      "handlers": [
-        "Open",
-        "Draw",
-        "Title",
-        "Font",
-        "Size",
-        "Text",
-        "Pixel",
-        "Close",
-        "Copy",
-        "Paste"
-      ],
-      "global": false
     }
   }
 }

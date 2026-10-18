@@ -1,0 +1,11 @@
+| A stand-in for `http_server`: binds nothing. A fixture sends Request
+| particles to the program directly.
+
+Config { host, port } =>
+    return ConfigResult { ok = true }
+
+Listen =>
+    return ListenResult { ok = true, port = 40123, message = "" }
+
+Stop =>
+    return StopResult { ok = true }

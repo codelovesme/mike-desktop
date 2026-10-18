@@ -1,0 +1,103 @@
+| A stand-in for the `process` module: nothing runs. Every Run and Spawn is
+| kept in an outbox a fixture can read, and answers as told.
+|
+| Test-only handlers:
+|   Ran => Commands { items = [{ command, args, stdin, spawned }] }, in order
+|   Reset => ResetDone { ok = true }
+|   Fail { code, stderr } => the next Run answers with it
+|   Say { stdout } => queue one command's stdout; Runs take them in turn
+|   Respond { command, arg, stdout, code } => once the queue is empty, a Run
+|       of `command` whose args include `arg` (any args when "") answers
+|       this; the newest matching rule wins
+|   Alive { alive, code } => what Status answers for every spawned child
+|
+| `cat /proc/sys/kernel/random/uuid ...` answers a fresh pair each time, so
+| tokens the service makes are distinct.
+
+ran = []
+next_code = 0
+next_stderr = ""
+lines = []
+rules = []
+child_alive = true
+child_code = null
+fresh = 0
+
+Run { command, args, stdin } =>
+    ran += [{ command = command, args = args, stdin = stdin, spawned = false }]
+    code = next_code
+    err = next_stderr
+    next_code = 0
+    next_stderr = ""
+    out = ""
+    if lines ≠ []
+        out = lines[0]
+        lines = lines (0, length)
+        return RunResult { code = code, success = code = 0, stdout = out, stderr = err }
+    if command = "cat" and args ∈ Array and args ≠ [] and args[0] = "/proc/sys/kernel/random/uuid"
+        fresh += 1
+        digits = "" + fresh
+        emit Length { value = digits } to core get size
+        pad = ""
+        loop
+            emit Length { value = pad } to core get padded
+            if padded.value + size.value ≥ 12
+                break
+            pad += "0"
+        out = "aaaaaaaa-bbbb-cccc-dddd-" + pad + digits + "\n11111111-2222-3333-4444-555555555555\n"
+        return RunResult { code = 0, success = true, stdout = out, stderr = "" }
+    loop rule over rules
+        matches = rule.command = command
+        if matches and rule.arg ≠ ""
+            found = false
+            if args ∈ Array
+                loop one over args
+                    if one = rule.arg, found = true
+            matches = found
+        if matches
+            return RunResult { code = rule.code, success = rule.code = 0, stdout = rule.stdout, stderr = err }
+    return RunResult { code = code, success = code = 0, stdout = out, stderr = err }
+
+Spawn { id, command, args, cwd } =>
+    ran += [{ command = command, args = args, stdin = null, spawned = true }]
+    emit Length { value = ran } to core get count
+    return SpawnResult { id = id, pid = 4000 + count.value }
+
+Status { id } =>
+    state = "running"
+    if not child_alive, state = "exited"
+    if not child_alive and child_code ≠ 0, state = "failed"
+    return StatusResult { id = id, alive = child_alive, code = child_code, status = state }
+
+Wait { id } =>
+    return StatusResult { id = id, alive = false, code = 0, status = "exited" }
+
+Kill { id } =>
+    ran += [{ command = "<kill>", args = [id], stdin = null, spawned = false }]
+    return KillResult { id = id, killed = true }
+
+Alive { alive, code } =>
+    child_alive = alive
+    child_code = code
+    return AliveSet
+
+Say { stdout } =>
+    lines += [stdout]
+    return Saying { queued = lines }
+
+Respond { command, arg, stdout, code } =>
+    rules = [{ command = command, arg = arg, stdout = stdout, code = code }] + rules
+    return Responding
+
+Fail { code, stderr } =>
+    next_code = code
+    next_stderr = stderr
+    return Failing { ok = true }
+
+Ran =>
+    return Commands { items = ran }
+
+Reset =>
+    ran = []
+    lines = []
+    return ResetDone { ok = true }
