@@ -1,4 +1,4 @@
-name: Release Mike Desktop
+name: Release Mike packages
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  CDLVSM_CODE_VERSION: v2.12.1
+  CDLVSM_CODE_VERSION: v2.14.5
   CDLVSM_EUGLENA_VERSION: v0.4.3
 
 jobs:
@@ -28,30 +28,36 @@ jobs:
           "$HOME/.local/bin/cdlvsm" install euglena
       - name: Verify and package
         run: |
+          set -euo pipefail
+          cd service
           cdlvsm euglena install
-          cdlvsm code build tests/support/process_mock.code --target shared -o tests/support/process_mock.so
+          CODE_BIN="$(command -v cdlvsm-code)" sh tests/support/build.sh
           cdlvsm euglena test
+          cdlvsm euglena format --check
+          cd ..
           CODE_BIN="$(command -v cdlvsm-code)" /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py'
           MIKE_TEST_PORTAL=1 dbus-run-session -- /usr/bin/python3 -m unittest discover -s tests -p 'test_portal_ipc.py'
-          cdlvsm euglena format --check
-          if [ "${{ github.ref_type }}" = tag ]; then version="${{ github.ref_name }}"; else version=dev; fi
+          if [ "${{ github.ref_type }}" = tag ]; then version="${{ github.ref_name }}"; else version=v0.5.0-ci; fi
+          python3 tools/package.py --service-only "$version" dist
+          python3 tools/package.py --cli-only "$version" dist
           python3 tools/package.py "$version" dist
-          dist/mike-desktop-"$version"-x86_64-linux/mike --version
-      - name: Smoke test extracted bundle
+          for command in mike-service mike-cli mike-desktop; do
+            dist/"$command-$version-x86_64-linux/$command" --version
+          done
+      - name: Smoke test extracted Desktop bundle
         run: |
           set -euo pipefail
-          if [ "${{ github.ref_type }}" = tag ]; then version="${{ github.ref_name }}"; else version=dev; fi
+          if [ "${{ github.ref_type }}" = tag ]; then version="${{ github.ref_name }}"; else version=v0.5.0-ci; fi
           mkdir -p "$RUNNER_TEMP/bare-home"
-          code_bin=$(command -v cdlvsm-code)
           set +e
-          HOME="$RUNNER_TEMP/bare-home" GDK_BACKEND=x11 MIKE_DESKTOP_CODE_BIN="$code_bin" \
+          HOME="$RUNNER_TEMP/bare-home" GDK_BACKEND=x11 \
             timeout 8s xvfb-run -a dist/mike-desktop-"$version"-x86_64-linux/mike
           result=$?
           set -e
           test "$result" -eq 124
       - uses: actions/upload-artifact@v4
         with:
-          name: mike-desktop-bundle
+          name: mike-packages
           path: dist/*.tar.gz
       - name: Publish
         if: github.ref_type == 'tag'
