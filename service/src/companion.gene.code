@@ -1007,6 +1007,9 @@ Route { method, path, body, headers } =>
     if path = "/v1/grants/revoke"
         emit RevokeGrantLocally { session = session, request = request } to this get dropped
         return dropped
+    if path = "/v1/editor/result" or path = "/v1/editor/close"
+        emit EditorRelay { session = session, request = request, close = path = "/v1/editor/close" } to this get relayed
+        return relayed
     if path = "/v1/chat/ask"
         emit ChatAsk { session = session, request = request } to this get asked
         return asked
@@ -1051,6 +1054,7 @@ TouchSession { id } =>
 | another approval-capable client can answer; the task neither runs nor is
 | declined because a window closed. A running command keeps its bounds.
 DropSession { id } =>
+    emit EndEditorSession { id = id } to this
     kept = []
     loop one over sessions
         if one.id ≠ id, kept += [one]
@@ -1063,6 +1067,7 @@ DropSession { id } =>
 ExpireSessions { now } =>
     kept = []
     loop one over sessions
+        if now - one.seen > 45, emit EndEditorSession { id = one.id } to this
         if now - one.seen ≤ 45, kept += [one]
     sessions = kept
     if work ≠ null and work.approver ≠ "" and work.grant_id = ""
@@ -1167,6 +1172,7 @@ StateFor { session } =>
         approvals = session.approvals
         account = account_email
         device_id = device_id
+        editor_version = 1
         chat_version = 1
         connection = connection
         paired = credential ≠ ""
@@ -1322,6 +1328,8 @@ RevokeThisDevice =>
 | the conversation and memory. A turn is visible to a session that started
 | it or explicitly resumed it after central ownership verification.
 ForgetTurns =>
+    loop one over sessions
+        emit EndEditorSession { id = one.id } to this
     turns = []
     return Forgotten
 
@@ -1339,16 +1347,34 @@ ChatAsk { session, request } =>
             emit Fail { status = 400, error = "bad_request", message = "workspace is too long" } to this get long
             return long
         workspace = request.workspace
-    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text, device_id = device_id, workspace = workspace } } } to this get started
+    editor = null
+    if request.editor ∈ Object
+        mode = request.editor.mode
+        if mode ≠ "ask" and mode ≠ "plan" and mode ≠ "edit" and mode ≠ "auto"
+            emit Fail { status = 400, error = "bad_editor", message = "unknown editor mode" } to this get invalid_mode
+            return invalid_mode
+        if workspace = "" or request.editor.context ∉ String
+            emit Fail { status = 400, error = "bad_editor", message = "editor workspace/context required" } to this get invalid_context
+            return invalid_context
+        emit Length { value = request.editor.context } to core get context_size
+        if context_size.value > 32000
+            emit Fail { status = 400, error = "bad_editor", message = "editor context exceeds 32000 characters" } to this get oversized
+            return oversized
+        emit RandomToken to this get binding
+        if binding ∉ Token
+            emit Fail { status = 503, error = "no_random_source", message = "could not bind editor" } to this get no_binding
+            return no_binding
+        editor = { binding = binding.value, mode = mode, workspace = workspace, context = request.editor.context }
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text, device_id = device_id, workspace = workspace, editor = editor } } } to this get started
     if started ∉ Thinking
         emit Fail { status = 503, error = "mike_unavailable", message = "Mike did not start the turn" } to this get unavailable
         return unavailable
-    emit RememberChat { turn_id = started.turn_id, session = session.id } to this
+    emit RememberChat { turn_id = started.turn_id, session = session.id, editor = editor } to this
     return Answer { status = 200, value = { turn_id = started.turn_id } }
 
 | Session bindings are a bounded working set, not another chat database.
-RememberChat { turn_id, session } =>
-    turns += [{ turn_id = turn_id, session = session }]
+RememberChat { turn_id, session, editor } =>
+    turns += [{ turn_id = turn_id, session = session, editor = editor }]
     emit Length { value = turns } to core get count
     if count.value > 128, turns = turns[count.value - 128, length)
     return Remembered
@@ -1379,7 +1405,10 @@ ChatProgress { session, request } =>
     if owned ∉ TurnOwned
         emit Fail { status = 404, error = "unknown_turn", message = "this session did not start or resume that turn" } to this get unknown
         return unknown
-    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Progress { turn_id = request.turn_id } } } to this get turn
+    binding = ""
+    loop one over turns
+        if one.turn_id = request.turn_id and one.session = session.id and one.editor ∈ Object, binding = one.editor.binding
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Progress { turn_id = request.turn_id, binding = binding } } } to this get turn
     if turn ∉ Turn
         emit Fail { status = 503, error = "mike_unavailable", message = "Mike's progress is unavailable" } to this get unavailable
         return unavailable
@@ -1416,7 +1445,10 @@ ChatView { session, turn, id } =>
         work_id = turn.waiting.id
     steps = []
     if turn.steps ∈ Array, steps = turn.steps
-    return Answer { status = 200, value = { turn_id = id, stage = turn.stage, reply = reply, say = say, confirmation_id = nonce, steps = steps, work_id = work_id } }
+    editor_request = null
+    loop one over turns
+        if one.turn_id = id and one.session = session.id and one.editor ∈ Object, editor_request = turn.editor_request
+    return Answer { status = 200, value = { turn_id = id, stage = turn.stage, reply = reply, say = say, confirmation_id = nonce, steps = steps, work_id = work_id, editor_request = editor_request } }
 
 ChatConfirm { session, request } =>
     emit OwnTurn { session = session, turn_id = request.turn_id } to this get owned
@@ -1783,3 +1815,31 @@ SeenBefore { id } =>
     emit Stringify { value = seen_tasks } to json get text
     emit WritePrivate { path = state_dir + "/seen", text = text.value } to this
     return Seen { yes = false }
+
+| Only the original registered editor session can report/close editor work.
+EditorRelay { session, request, close } =>
+    binding = ""
+    loop one over turns
+        if one.turn_id = request.turn_id and one.session = session.id and one.editor ∈ Object, binding = one.editor.binding
+    if binding = ""
+        emit Fail { status = 403, error = "editor_unavailable", message = "this session does not own that editor" } to this get refused
+        return refused
+    particle = EditorResult { turn_id = request.turn_id, binding = binding, editor_request_id = request.id, editor_result = request.result }
+    if close, particle = EditorClosed { turn_id = request.turn_id, binding = binding }
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = particle } } to this get answer
+    if answer ∉ EditorAcknowledged and answer ∉ EditorClosed
+        emit Fail { status = 409, error = "stale_editor_request", message = "the editor operation was not acknowledged; do not replay the edit" } to this get stale
+        return stale
+    if close
+        kept = []
+        loop one over turns
+            if one.turn_id = request.turn_id and one.session = session.id, one = one + { editor = null }
+            kept += [one]
+        turns = kept
+    return Answer { status = 200, value = { acknowledged = true } }
+
+EndEditorSession { id } =>
+    loop one over turns
+        if one.session = id and one.editor ∈ Object and account_token ≠ ""
+            emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = EditorClosed { turn_id = one.turn_id, binding = one.editor.binding } } } to this
+    return Closed

@@ -367,6 +367,34 @@ emit Call { method = "POST", path = "/v1/chat/ask", body = "{\"text\":\"check th
 emit LastPost to this get project_post
 assert project_post.value.particle.workspace = "/srv/project"
 
+| Editor registrations belong to the original client, not another session
+| that explicitly resumes the same central conversation.
+emit Reply { body = "{\"_class\":\"Thinking\",\"turn_id\":\"editor-turn\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/ask", body = "{\"text\":\"edit in IDE\",\"workspace\":\"/project\",\"editor\":{\"mode\":\"edit\",\"context\":\"unsaved buffer\"}}", bearer = asker_token, extra = {} } to this get editor_ask
+assert editor_ask.status = 200
+emit LastPost to this get registered
+assert registered.value.particle.editor.mode = "edit"
+assert registered.value.particle.editor.binding ≠ ""
+emit Reply { body = "{\"_class\":\"Turn\",\"turn_id\":\"editor-turn\",\"stage\":\"waiting_editor\",\"pending\":null,\"steps\":[],\"editor_request\":{\"id\":\"r1\",\"class\":\"ReadBuffer\",\"fields\":{\"path\":\"a.code\"}}}" } to http
+emit Call { method = "POST", path = "/v1/chat/progress", body = "{\"turn_id\":\"editor-turn\"}", bearer = asker_token, extra = {} } to this get editor_progress
+assert editor_progress.value.editor_request.id = "r1"
+emit LastPost to this get renewal
+assert renewal.value.particle.binding = registered.value.particle.editor.binding
+emit Reply { body = "{\"_class\":\"Turn\",\"turn_id\":\"editor-turn\",\"stage\":\"waiting_editor\",\"pending\":null,\"steps\":[],\"editor_request\":{\"id\":\"r1\"}}" } to http
+emit Call { method = "POST", path = "/v1/chat/resume", body = "{\"turn_id\":\"editor-turn\"}", bearer = watch, extra = {} } to this get editor_observer
+assert editor_observer.status = 200 and editor_observer.value.editor_request = null
+emit Call { method = "POST", path = "/v1/editor/result", body = "{\"turn_id\":\"editor-turn\",\"id\":\"r1\",\"result\":{\"state\":\"saved\"}}", bearer = watch, extra = {} } to this get editor_foreign
+assert editor_foreign.status = 403
+emit Reply { body = "{\"_class\":\"EditorAcknowledged\",\"id\":\"r1\"}" } to http
+emit Call { method = "POST", path = "/v1/editor/result", body = "{\"turn_id\":\"editor-turn\",\"id\":\"r1\",\"result\":{\"state\":\"buffer_only\"}}", bearer = asker_token, extra = {} } to this get editor_delivered
+assert editor_delivered.value.acknowledged
+emit LastPost to this get editor_report
+assert editor_report.value.particle.binding = registered.value.particle.editor.binding
+assert editor_report.value.particle.editor_result.state = "buffer_only"
+emit Reply { body = "{\"_class\":\"EditorClosed\"}" } to http
+emit Call { method = "POST", path = "/v1/editor/close", body = "{\"turn_id\":\"editor-turn\"}", bearer = asker_token, extra = {} } to this get editor_closed
+assert editor_closed.value.acknowledged
+
 | ---- Account change: the old owner's running command is stopped and
 | reported with the old owner's credentials; every session must re-attach ----
 

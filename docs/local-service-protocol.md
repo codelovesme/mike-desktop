@@ -383,3 +383,24 @@ launcher accepts only a Code ≥ 2.12.1 and < 2.15.0, named by
 - The key and session tokens are compared as strings, not in constant
   time. Exploiting that would need timing over loopback HTTP against 256-bit
   random values; it is noted, not mitigated.
+
+## Optional live IDE capability (ticket 162)
+
+State advertises `editor_version=1`. `/v1/chat/ask` may include `editor:
+{mode, context}` with the explicit workspace; supported modes are ask/plan/
+edit/auto and context is bounded to 32000 text length. The service creates
+a private per-turn binding, never returned to clients. Central Mike adds
+only the currently exposed editor tools; Ask/Plan omit terminal/write actions.
+
+Progress adds `editor_request` (id, class, fields) only to the original
+registered session. `/v1/editor/result` takes `{turn_id,id,result}`;
+`/v1/editor/close` takes `{turn_id}`. Both enforce original session ownership
+and relay the private binding. A client resuming a turn cannot inherit it.
+Central result ACKs are idempotent. Detach, session expiry and generation
+changes close editor capabilities; if connectivity prevents closing, central
+Mike expires the 45-second lease. Only bound service progress renews it.
+
+The IDE owns buffer revisions, diff approval, save status and undo; this
+service does not duplicate its editor implementation. Existing machine
+tool grants/approvals still apply independently. See the IDE repository's
+`docs/mike.md` for supported editor tools and real integration evidence.
