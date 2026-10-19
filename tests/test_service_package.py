@@ -57,6 +57,20 @@ class ServicePackageTest(unittest.TestCase):
             self.assertNotIn(absent, names)
         self.assertFalse(any("pycache" in name or "desktop_webview" in name for name in names))
 
+    def test_package_information_declares_what_cdlvsm_resolves(self):
+        info = (self.package / "cdlvsm-package.info").read_text().splitlines()
+        self.assertIn("format=1", info)
+        self.assertIn("service=mike-service", info)
+        self.assertIn("system=python3", info)
+        [code] = [line for line in info if line.startswith("requires=")]
+        # The same range the launcher enforces, satisfied beside a newer
+        # active Code (an exact binding), never by replacing it.
+        self.assertTrue(code.startswith("requires=code >=2.12.1 <2.15.0 pin=v2.14.5 "), code)
+        self.assertIn(" bind=exact", code)
+        launcher = (self.package / "mike-service").read_text()
+        self.assertIn("Code >= 2.12.1 and < 2.15.0", launcher)
+        self.assertNotIn("webkit", "\n".join(info).lower())
+
     def test_code_requirement_is_checked_not_guessed(self):
         with tempfile.TemporaryDirectory() as temporary:
             area = Path(temporary)
@@ -103,6 +117,30 @@ class ServicePackageTest(unittest.TestCase):
                 log.close()
             self.assertIn("mike-service: ready for local clients", (area / "run.log").read_text())
 
+    def test_cdlvsm_binding_wins_over_an_incompatible_active_code(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            area = Path(temporary)
+            installed = area / "packages/mike-service/v0.0.0-test"
+            shutil.copytree(self.package, installed, symlinks=True)
+            current = area / "packages/code/current"
+            current.mkdir(parents=True)
+            (current / "code").write_text("#!/bin/sh\necho 'Code v2.16.0'\n")
+            (current / "code").chmod(0o755)
+            side = area / "packages/code/v2.14.0"
+            side.mkdir()
+            (side / "code").write_text("#!/bin/sh\necho 'Code v2.14.0'\nexit 7\n")
+            (side / "code").chmod(0o755)
+            (installed / ".cdlvsm-deps").mkdir()
+            (installed / ".cdlvsm-deps/code").symlink_to(side)
+            ran = self.launch(installed, area, "run")
+            # The bound Code was chosen (it exits 7 when asked to run), not
+            # refused, and the incompatible active one was not tried.
+            self.assertEqual(ran.returncode, 7, ran.stderr)
+            (side / "code").write_text("#!/bin/sh\necho 'Code v2.15.0'\n")
+            refused = self.launch(installed, area, "run")
+            self.assertEqual(refused.returncode, 1)
+            self.assertIn("needs Code >= 2.12.1 and < 2.15.0", refused.stderr)
+
     def test_lifecycle_without_desktop(self):
         with tempfile.TemporaryDirectory() as temporary:
             area = Path(temporary)
@@ -120,6 +158,30 @@ class ServicePackageTest(unittest.TestCase):
             self.assertEqual(stopped.returncode, 0, stopped.stderr)
             after = self.launch(self.package, area, "status")
             self.assertEqual(after.returncode, 3)
+
+
+class DesktopPackageTest(unittest.TestCase):
+    """The Desktop bundle declares the shared service instead of carrying it."""
+
+    def test_desktop_declares_the_service_and_carries_none(self):
+        with tempfile.TemporaryDirectory(prefix="mike-desktop-package-") as temporary:
+            out = Path(temporary)
+            staged = subprocess.run(["/usr/bin/python3", str(ROOT / "tools/package.py"), "v0.5.2", str(out)],
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual(staged.returncode, 0, staged.stderr)
+            bundle = out / "mike-desktop-v0.5.2-x86_64-linux"
+            for required in ("mike", "mike-desktop", "VERSION", "app.info", "ui/desktop_webview.py",
+                             "client/mike_service.py", "cdlvsm-package.info"):
+                self.assertTrue((bundle / required).exists(), required)
+            for absent in ("service", "mike-service", "client/service_control.py"):
+                self.assertFalse((bundle / absent).exists(), absent)
+            info = (bundle / "cdlvsm-package.info").read_text().splitlines()
+            self.assertIn("requires=mike-service >=0.5.2 <0.6.0 pin=v0.5.2", info)
+            self.assertIn("system=webkitgtk document-portal", info)
+            self.assertFalse([line for line in info if line.startswith("requires=code")],
+                             "Code comes through the service, not the window")
+            launched = subprocess.run([str(bundle / "mike"), "--version"], capture_output=True, text=True, timeout=10)
+            self.assertEqual(launched.stdout.strip(), "Mike v0.5.2")
 
 
 if __name__ == "__main__":

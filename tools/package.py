@@ -7,8 +7,9 @@
 The service package (docs/service-package.md) is independently installable:
 its launcher, lifecycle control, local-protocol client, Euglena application
 and exact modules from service/.code/lock.json — and nothing of the Desktop
-UI. The Desktop bundle carries the same service tree beside the window until
-generic package dependencies (ticket 163) let Desktop declare it instead.
+UI. The Desktop bundle is the window and the protocol client only; it
+declares the service as a CDLVSM dependency (cdlvsm-package.info) instead
+of carrying it, so every client on a computer shares one installed service.
 """
 
 import hashlib
@@ -20,6 +21,40 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")
+
+# The Code the service's modules (ABI 1) load in, and the release installed
+# for it when no compatible Code is present: the newest one verified, with
+# its published archive digest. CDLVSM installs it beside a newer active
+# Code rather than replacing that (bind=exact; bin/mike-service uses
+# .cdlvsm-deps/code). Keep in step with bin/mike-service's check.
+CODE_REQUIREMENT = (">=2.12.1 <2.15.0 pin=v2.14.5 "
+                    "sha256=f136458b60c8347cacfe15ee5089e74d8080053526d0121e69617ac82dbae723 bind=exact")
+
+
+def series(version: str) -> str:
+    """`>=<version> <major.(minor+1).0`: a Desktop needs at least the service
+    released with it, within the same minor series (protocol 1 throughout)."""
+    core = version.lstrip("v").split("-")[0].split(".")
+    major, minor = int(core[0]), int(core[1])
+    return f">={version.lstrip('v')} <{major}.{minor + 1}.0 pin={version}"
+
+
+def service_info() -> str:
+    """CDLVSM package information for the service package (docs/service-package.md)."""
+    return ("# CDLVSM package information: what this release needs.\n"
+            "format=1\n"
+            f"requires=code {CODE_REQUIREMENT}\n"
+            "system=python3\n"
+            "service=mike-service\n")
+
+
+def desktop_info(version: str) -> str:
+    """CDLVSM package information for the Desktop window: the shared service
+    (which brings its Code) and the desktop's own WebKitGTK and portal."""
+    return ("# CDLVSM package information: what this release needs.\n"
+            "format=1\n"
+            f"requires=mike-service {series(version)}\n"
+            "system=webkitgtk document-portal\n")
 
 
 def stage_service(stage: Path, version: str) -> None:
@@ -49,6 +84,7 @@ def stage_service(stage: Path, version: str) -> None:
         shutil.copy2(ROOT / "docs" / name, docs / name)
     shutil.copy2(ROOT / "bin/mike-service", stage / "mike-service")
     (stage / "VERSION").write_text(version + "\n")
+    (stage / "cdlvsm-package.info").write_text(service_info())
 
 
 def archive(out: Path, stage: Path) -> Path:
@@ -87,7 +123,10 @@ def main():
         print(archive(out, stage))
         return
     stage = fresh(out, f"mike-desktop-{version}-x86_64-linux")
-    stage_service(stage, version)
+    (stage / "client").mkdir()
+    shutil.copy2(ROOT / "client/mike_service.py", stage / "client/mike_service.py")
+    (stage / "VERSION").write_text(version + "\n")
+    (stage / "cdlvsm-package.info").write_text(desktop_info(version))
     shutil.copy2(ROOT / "README.md", stage / "README.md")
     shutil.copytree(ROOT / "ui", stage / "ui", ignore=IGNORE)
     shutil.copy2(ROOT / "bin/mike-desktop", stage / "mike-desktop")

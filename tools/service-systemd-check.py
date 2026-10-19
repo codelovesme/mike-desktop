@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Check the shared service's systemd user-unit lifecycle from a staged package
-(`tools/package.py --service-only`, or the interim Desktop bundle).
+(`tools/package.py --service-only`).
 
 Installs a uniquely named, *not enabled* user unit pointing at BUNDLE with a
 scratch environment file (state, runtime dir, host, Code), then checks:

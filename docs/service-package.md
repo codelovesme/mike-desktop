@@ -31,10 +31,11 @@ run` needs only Code and POSIX tools (`sh`, `flock`, `tail`, `stat`,
 (the file opener additionally needs the session bus and a document portal,
 and fails closed without them). No step needs root.
 
-The Desktop bundle (`tools/package.py <version> <out>`) is an interim
-artifact: it stages this same tree at its root beside `ui/` and the
-`mike`/`mike-desktop` launchers, because no generic package dependency
-exists yet.
+The Desktop bundle (`tools/package.py <version> <out>`) does not carry this
+tree: it is the window (`ui/`, the `mike`/`mike-desktop` launchers) and the
+protocol client, and its `cdlvsm-package.info` declares the service as a
+CDLVSM dependency (below), so Desktop, CLI and IDE on one computer share one
+installed service.
 
 ## Launch contract
 
@@ -43,8 +44,9 @@ exists yet.
   start (another instance, a non-private directory, a bad setting, an
   incompatible Code), and otherwise runs until stopped.
 - Code: the bundled modules are Code 2.12.1 releases (module ABI 1). The
-  launcher uses `MIKE_SERVICE_CODE_BIN` if set, else CDLVSM's installed
-  `../../code/current/code`, and in either case only if `--version` reports
+  launcher uses `MIKE_SERVICE_CODE_BIN` if set, else the Code CDLVSM
+  resolved for this package (`.cdlvsm-deps/code`), else CDLVSM's active
+  `../../code/current/code`, and in each case only if `--version` reports
   **≥ 2.12.1 and < 2.15.0**; otherwise it exits 1 naming the requirement.
   It never falls back to other interpreters. Verified: the staged package
   serves under Code 2.12.1, 2.13.0, 2.14.0, 2.14.1, 2.14.3, 2.14.4 and
@@ -61,32 +63,50 @@ exists yet.
   does not delete it.
 - `install-unit` writes `~/.config/systemd/user/mike-service.service`
   pointing at this package's launcher; reinstalling to a new path must run it
-  again. `status` exits 0 when the service answers, 3 when it does not.
+  again (CDLVSM does, after every install and upgrade). Its environment file
+  is `--environment-file`, else `MIKE_SERVICE_ENVIRONMENT_FILE`, else
+  `~/.config/mike-service/environment`. `status` exits 0 when the service answers, 3 when it does not.
 - Clients find the running service by its runtime directory
   (`docs/local-service-protocol.md`), never by package path. To start it, a
   client uses the user unit if installed, otherwise a launcher named by
-  `MIKE_SERVICE_LAUNCHER`, one beside it (the interim bundle), or
+  `MIKE_SERVICE_LAUNCHER`, the service CDLVSM resolved for it
+  (`.cdlvsm-deps/mike-service`), one beside it (a source checkout), or
   `mike-service` on `PATH`.
 
-## Handoff to ticket 163 (generic package dependencies)
+## CDLVSM package information
 
-What a generic resolver must provide for Desktop, CLI and IDE to depend on
-this package instead of carrying it — no Mike-specific branches:
+Both packages carry `cdlvsm-package.info` (format in CDLVSM's
+`docs/package-dependencies.md`), written by `tools/package.py`:
 
-1. A package named for the service whose artifact is the tree above.
-2. Desktop (and later CLI) declare a dependency on it; IDE's Mike support
-   declares it where that feature is installed.
-3. A runtime constraint the resolver can satisfy: Code ≥ 2.12.1, < 2.15.0
-   for this package version, satisfied by installing a compatible Code next
-   to the current one rather than replacing it (today CDLVSM's
-   `code/current` is 2.16.0, which this package — and the installed Mike
-   Desktop 0.4.1 — cannot use).
-4. `mike-service` exposed on `PATH`, and a hook (or documented step) that
-   runs `mike-service install-unit` for the user after install/upgrade and
-   `uninstall-unit` on removal.
-5. Reuse of an already-installed compatible service rather than a second
-   copy, and upgrade ordering that keeps the protocol version a client
-   needs (protocol 1 here; clients check `X-Mike-Protocol`).
+```text
+# mike-service
+format=1
+requires=code >=2.12.1 <2.15.0 pin=v2.14.5 sha256=<code-v2.14.5 archive> bind=exact
+system=python3
+service=mike-service
 
-Until then the interim Desktop bundle carries the service, and nothing in
-this ticket changes CDLVSM.
+# mike (Desktop), version <v>
+format=1
+requires=mike-service >=<v> <<major>.<minor+1>.0 pin=<v>
+system=webkitgtk document-portal
+```
+
+- The service's Code is an **exact** binding: with a newer Code active
+  (2.16 today) CDLVSM installs 2.14.5 beside it, or reuses an installed
+  2.12.1–2.14.x, and links it as `.cdlvsm-deps/code`. The active Code and
+  what uses it are not touched. Moving to Code 2.15+ means repinning the
+  modules, this requirement and the launcher's check together.
+- `service=mike-service` is the generic service contract: CDLVSM runs
+  `install-unit` after install/upgrade (then `restart` if it was running)
+  and `stop`/`uninstall-unit` before removal. It does not start the service
+  and installation pairs nothing.
+- Desktop needs at least the service released with it, within its minor
+  series (protocol 1 throughout). Desktop's WebKitGTK and portal are its own;
+  the service and a headless install need neither.
+- A future terminal client (161) declares `requires=mike-service …` and no
+  GUI capability; IDE (162) declares `feature.mike=mike-service …`, selected
+  with `cdlvsm install ide --with mike`. Neither needs the other.
+
+Nothing here is released: there is no `mike-service` asset and no Mike 0.5
+release yet. CDLVSM's `tests/mike_packages.rs` stages both packages from
+this checkout into a local release directory and installs them.

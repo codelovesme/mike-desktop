@@ -160,7 +160,9 @@ def stop() -> int:
 
 
 def install_unit(bundle: Path, args: list[str]) -> int:
-    environment, enable = None, True
+    # A package manager runs this without arguments; the variable lets an
+    # isolated installation point its unit at a scratch environment file.
+    environment, enable = os.environ.get("MIKE_SERVICE_ENVIRONMENT_FILE") or None, True
     rest = list(args)
     while rest:
         option = rest.pop(0)

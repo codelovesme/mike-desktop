@@ -1,7 +1,9 @@
 import importlib.util
+import os
 from pathlib import Path
+import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location("desktop_webview", Path(__file__).resolve().parents[1] / "ui/desktop_webview.py")
 webview = importlib.util.module_from_spec(spec)
@@ -14,6 +16,28 @@ class DesktopAppIdTest(unittest.TestCase):
         self.assertEqual(webview.desktop_app_id(packages / "mike/v0.4.1/ui/desktop_webview.py"), "codelovesme-mike")
         self.assertEqual(webview.desktop_app_id(packages / "mike-desktop/v0.4.1/ui/desktop_webview.py"), "codelovesme-mike-desktop")
         self.assertEqual(webview.desktop_app_id(Path("/src/mike-desktop/ui/desktop_webview.py")), "codelovesme-mike")
+
+
+class ServiceLauncherTest(unittest.TestCase):
+    def test_the_service_cdlvsm_resolved_comes_first(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "mike/v0.5.0"
+            service = Path(temporary) / "mike-service/current"
+            for directory in (root / ".cdlvsm-deps", service):
+                directory.mkdir(parents=True)
+            (service / "mike-service").write_text("#!/bin/sh\n")
+            (service / "mike-service").chmod(0o755)
+            (root / ".cdlvsm-deps/mike-service").symlink_to(service)
+            beside = root / "mike-service"
+            beside.write_text("#!/bin/sh\n")
+            beside.chmod(0o755)
+            with patch.dict(os.environ, {"PATH": "/nonexistent"}):
+                os.environ.pop("MIKE_SERVICE_LAUNCHER", None)
+                self.assertEqual(webview.service_launcher(root), root / ".cdlvsm-deps/mike-service/mike-service")
+                (root / ".cdlvsm-deps/mike-service").unlink()
+                self.assertEqual(webview.service_launcher(root), beside)
+                beside.unlink()
+                self.assertIsNone(webview.service_launcher(root))
 
 
 class NavigationTest(unittest.TestCase):

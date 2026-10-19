@@ -122,7 +122,9 @@ The service's modules are pinned to Code 2.12.1 releases (module ABI 1):
 its launcher accepts only Code ≥ 2.12.1 and < 2.15.0 (`MIKE_SERVICE_CODE_BIN`
 or CDLVSM's installed Code) and refuses anything else. Develop with 2.14.x.
 `tools/package.py --service-only <version> <out>` stages the service as its
-own package, with no Desktop UI ([docs/service-package.md](docs/service-package.md)).
+own package, with no Desktop UI; `tools/package.py <version> <out>` stages the
+Desktop window, which declares the service as a CDLVSM dependency instead of
+carrying it ([docs/service-package.md](docs/service-package.md)).
 
 ```sh
 cd service
@@ -154,7 +156,8 @@ EUGLENA_HOST_URL=http://127.0.0.1:8923 E2E_EMAIL=... E2E_PASSWORD=... \
 Every boundary is real except the document portal's final call, which
 `MIKE_OPEN_LOG` replaces with a recorder; every device the run pairs is
 revoked. `tools/service-systemd-check.py <bundle>` installs a uniquely named,
-unenabled user unit for a staged bundle (`tools/package.py`), checks
+unenabled user unit for a staged service package (`tools/package.py
+--service-only`), checks
 start/status, duplicate start, crash restart, stop and failure reporting,
 and removes it. `tools/terminal-ui-smoke.py` checks the native GTK approval,
 decline, Stop, sign-out, account switch, revocation and window close with a

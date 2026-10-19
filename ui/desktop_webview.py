@@ -794,11 +794,13 @@ class MikeWindow:
 
 
 def service_launcher(root: Path) -> Path | None:
-    """Where the shared service's launcher is: named explicitly, beside this
-    window in the interim Desktop bundle, in a source checkout, or — once
-    Desktop declares the service as a package dependency — on PATH."""
+    """Where the shared service's launcher is: named explicitly, the service
+    package CDLVSM resolved for this Desktop (.cdlvsm-deps/mike-service, the
+    active one), beside this window in a self-contained bundle, in a source
+    checkout, or on PATH."""
     named = os.environ.get("MIKE_SERVICE_LAUNCHER")
-    candidates = [Path(named)] if named else [root / "mike-service", root / "bin/mike-service"]
+    candidates = [Path(named)] if named else [root / ".cdlvsm-deps/mike-service/mike-service",
+                                              root / "mike-service", root / "bin/mike-service"]
     found = shutil.which("mike-service")
     if not named and found:
         candidates.append(Path(found))

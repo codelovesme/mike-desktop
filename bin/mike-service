@@ -25,7 +25,9 @@ MIKE_SERVICE_HOST_URL=$host
 export MIKE_SERVICE_HOST_URL
 # The bundled modules are Code 2.12.1 releases (module ABI 1): a Code from
 # 2.12.1 up to, not including, 2.15.0 loads them. Use the named interpreter,
-# or CDLVSM's installed one; either is checked, never guessed past.
+# else the Code CDLVSM resolved for this package (.cdlvsm-deps/code, which may
+# be installed beside a newer active Code), else CDLVSM's active one; each
+# is checked, never guessed past.
 requirement='Code >= 2.12.1 and < 2.15.0 (module ABI 1)'
 compatible() {
     version=$("$1" --version 2>/dev/null | sed -n 's/^Code v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
@@ -41,6 +43,8 @@ if [ -n "${MIKE_SERVICE_CODE_BIN:-}" ]; then
         echo "mike-service: MIKE_SERVICE_CODE_BIN ($interpreter) is not $requirement" >&2
         exit 1
     }
+elif [ -x "$here/.cdlvsm-deps/code/code" ] && compatible "$here/.cdlvsm-deps/code/code"; then
+    interpreter="$here/.cdlvsm-deps/code/code"
 elif [ -x "$here/../../code/current/code" ] && compatible "$here/../../code/current/code"; then
     interpreter="$here/../../code/current/code"
 else
