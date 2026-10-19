@@ -18,6 +18,7 @@ from pathlib import Path
 import queue
 import secrets
 import shlex
+import shutil
 import sys
 import threading
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -221,9 +222,9 @@ class MikeWindow:
     def perform(self, action: str, payload):
         service = self.service
         if action == "start":
-            launcher = self.root / "mike-service"
-            if not launcher.exists():
-                launcher = self.root / "bin/mike-service"
+            launcher = service_launcher(self.root)
+            if launcher is None and not mike_service.unit_installed():
+                raise mike_service.ServiceUnavailable("the Mike service is not installed (mike-service not found)")
             env = None
             if not mike_service.unit_installed():
                 env = dict(os.environ, MIKE_SERVICE_HOST_URL=self.origin)
@@ -790,6 +791,21 @@ class MikeWindow:
             self.service.detach()
         self.calls.put((None, None, None))
         Gtk.main_quit()
+
+
+def service_launcher(root: Path) -> Path | None:
+    """Where the shared service's launcher is: named explicitly, beside this
+    window in the interim Desktop bundle, in a source checkout, or — once
+    Desktop declares the service as a package dependency — on PATH."""
+    named = os.environ.get("MIKE_SERVICE_LAUNCHER")
+    candidates = [Path(named)] if named else [root / "mike-service", root / "bin/mike-service"]
+    found = shutil.which("mike-service")
+    if not named and found:
+        candidates.append(Path(found))
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def activity_text(entries: list) -> str:

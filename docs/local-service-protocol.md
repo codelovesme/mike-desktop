@@ -239,7 +239,9 @@ session bus and a running desktop portal, and fails closed without them.
 
 Without the unit, Desktop starts the service detached (it outlives the
 window, logging to `~/.local/state/mike-service/service.log`);
-`mike-service stop` ends it.
+`mike-service stop` ends it. The service is its own package — contents,
+launch contract, the Code requirement and the hand-off to generic package
+dependencies are in [service-package.md](service-package.md).
 
 ## Compatibility
 
@@ -248,8 +250,9 @@ Within version 1, new routes and new fields may be added; clients ignore
 unknown fields. Removing or changing the meaning of a route, field, stage
 or error code requires version 2, and a service answers 426 to a version it
 does not speak. The service's Code modules are pinned in
-`service/.code/lock.json`; the Code interpreter must be able to load them
-(see `MIKE_SERVICE_CODE_BIN`).
+`service/.code/lock.json` (Code 2.12.1 releases, module ABI 1); the
+launcher accepts only a Code ≥ 2.12.1 and < 2.15.0, named by
+`MIKE_SERVICE_CODE_BIN` or installed by CDLVSM, and refuses otherwise.
 
 ## Security notes
 

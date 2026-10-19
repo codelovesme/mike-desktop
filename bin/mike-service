@@ -11,7 +11,7 @@ if [ ! -d "$here/service" ]; then
 fi
 command=${1:-}
 case "$command" in
-  --version|-V) printf 'mike-service %s (local protocol 1)\n' "$(cat "$here/VERSION" 2>/dev/null || printf dev)"; exit 0 ;;
+  --version|-V) printf 'mike-service %s (local protocol 1; Code >= 2.12.1 < 2.15.0)\n' "$(cat "$here/VERSION" 2>/dev/null || printf dev)"; exit 0 ;;
   --help|-h|'') sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   run) ;;
   *)
@@ -23,18 +23,29 @@ esac
 host=${MIKE_SERVICE_HOST_URL:-${MIKE_DESKTOP_HOST_URL:-https://apps.codeloves.me}}
 MIKE_SERVICE_HOST_URL=$host
 export MIKE_SERVICE_HOST_URL
+# The bundled modules are Code 2.12.1 releases (module ABI 1): a Code from
+# 2.12.1 up to, not including, 2.15.0 loads them. Use the named interpreter,
+# or CDLVSM's installed one; either is checked, never guessed past.
+requirement='Code >= 2.12.1 and < 2.15.0 (module ABI 1)'
+compatible() {
+    version=$("$1" --version 2>/dev/null | sed -n 's/^Code v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+    [ -n "$version" ] || return 1
+    major=${version%%.*}; rest=${version#*.}; minor=${rest%%.*}; patch=${rest#*.}
+    [ "$major" -eq 2 ] || return 1
+    [ "$minor" -ge 12 ] && [ "$minor" -le 14 ] || return 1
+    [ "$minor" -gt 12 ] || [ "$patch" -ge 1 ]
+}
 if [ -n "${MIKE_SERVICE_CODE_BIN:-}" ]; then
     interpreter=$MIKE_SERVICE_CODE_BIN
-elif [ -n "${MIKE_DESKTOP_CODE_BIN:-}" ]; then
-    interpreter=$MIKE_DESKTOP_CODE_BIN
-elif [ -x "$here/../../code/current/code" ]; then
+    [ -x "$interpreter" ] && compatible "$interpreter" || {
+        echo "mike-service: MIKE_SERVICE_CODE_BIN ($interpreter) is not $requirement" >&2
+        exit 1
+    }
+elif [ -x "$here/../../code/current/code" ] && compatible "$here/../../code/current/code"; then
     interpreter="$here/../../code/current/code"
 else
-    interpreter=$(command -v cdlvsm-code || true)
-fi
-[ -n "$interpreter" ] && [ -x "$interpreter" ] || {
-    echo 'mike-service: a Code interpreter compatible with the bundled 2.12.1 modules is needed; set MIKE_SERVICE_CODE_BIN' >&2
+    echo "mike-service: needs $requirement; set MIKE_SERVICE_CODE_BIN to one (CDLVSM's current Code is not compatible or absent)" >&2
     exit 1
-}
+fi
 cd "$here/service"
 exec "$interpreter" run main.code

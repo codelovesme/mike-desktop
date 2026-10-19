@@ -118,8 +118,11 @@ exact-file dialogs. A terminal client of the service is separate work.
 
 ## Develop and verify
 
-The Desktop's modules and the service's are pinned to Code 2.12.1 releases;
-use a Code interpreter that can load them (2.14.x; 2.15+ needs newer pins).
+The service's modules are pinned to Code 2.12.1 releases (module ABI 1):
+its launcher accepts only Code ≥ 2.12.1 and < 2.15.0 (`MIKE_SERVICE_CODE_BIN`
+or CDLVSM's installed Code) and refuses anything else. Develop with 2.14.x.
+`tools/package.py --service-only <version> <out>` stages the service as its
+own package, with no Desktop UI ([docs/service-package.md](docs/service-package.md)).
 
 ```sh
 cd service
