@@ -21,7 +21,7 @@ mike: the text-mode window (MIKE_DESKTOP_TEXT_UI) was retired in 0.5.
 Unset MIKE_DESKTOP_TEXT_UI to open the Mike window: chat, history, apps,
 voice (Speak, voice chat, read aloud) and Mike's approvals are there and on
 the website. Local tasks now run in the shared Mike service (mike-service
-status). A terminal client for the service is separate, planned work.
+status). For terminal use, install the separate mike-cli package.
 MSG
     exit 2
 fi

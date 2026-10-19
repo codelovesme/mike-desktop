@@ -4,7 +4,8 @@ The shared Mike service is installable on its own — on a desktop or a
 headless server — without the Desktop window. `tools/package.py
 --service-only <version> <out>` stages it from a checkout (after
 `euglena test` in `service/` has generated `service/main.code`). Staging
-publishes nothing; there is no release in this change.
+publishes nothing. The v0.5.0 release workflow packages the service, CLI and
+Desktop separately under one release.
 
 ## Contents
 
@@ -103,10 +104,10 @@ system=webkitgtk document-portal
 - Desktop needs at least the service released with it, within its minor
   series (protocol 1 throughout). Desktop's WebKitGTK and portal are its own;
   the service and a headless install need neither.
-- A future terminal client (161) declares `requires=mike-service …` and no
+- The terminal client (161) declares `requires=mike-service …` and no
   GUI capability; IDE (162) declares `feature.mike=mike-service …`, selected
   with `cdlvsm install ide --with mike`. Neither needs the other.
 
-Nothing here is released: there is no `mike-service` asset and no Mike 0.5
-release yet. CDLVSM's `tests/mike_packages.rs` stages both packages from
-this checkout into a local release directory and installs them.
+Mike v0.5.0 publishes all three package assets. Use CDLVSM 0.12.0 or newer
+for dependency-aware installation. CDLVSM's `tests/mike_packages.rs` stages
+packages from this checkout into a local release directory and installs them.
