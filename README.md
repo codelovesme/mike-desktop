@@ -97,6 +97,29 @@ no display and never asks for root. Its private local protocol, the meaning
 of detach, sign-out, account change and revocation, and the systemd details
 are in [docs/local-service-protocol.md](docs/local-service-protocol.md).
 
+### On a server without a display
+
+The same service runs on a headless Linux server (no Desktop, WebKit,
+display or inbound port; it only connects out). Enroll it with a code you
+confirm in Mike on any signed-in device, then grant the work it may do
+unattended:
+
+```sh
+mike-service install-unit && mike-service start
+mike-service enroll --account you@example.com --name build-server
+#   … enter the printed code in Mike → Your devices → Connect a server
+mike-service grant add --root ~/src/app --run 'git status' --run 'python3 -m unittest' \
+    --ask 'git commit' --hours 8
+mike-service grant list | grant revoke ID | unenroll
+```
+
+Enrolling grants nothing; a server runs only steps a grant covers, checked
+on the server itself. `--ask` commands wait for your yes in the Mike
+conversation (a push to your own ntfy topic tells you, if you set one).
+**A grant is not a sandbox**: granted commands run as this OS user with all
+of its rights, and the directory is only where they start. See
+[Headless servers](docs/local-service-protocol.md#headless-servers-enrollment-and-grants).
+
 Google sign-in uses the same external browser connection route when the
 identity provider is configured.
 
@@ -152,6 +175,14 @@ switch with a running command, and a crash/restart:
 EUGLENA_HOST_URL=http://127.0.0.1:8923 E2E_EMAIL=... E2E_PASSWORD=... \
   E2E_SECOND_EMAIL=... E2E_SECOND_PASSWORD=... python3 tools/service-e2e.py
 ```
+
+Headless servers (ticket 160) have their own run against a disposable
+stack (`my-euglena-apps/tools/mike-scratch-stack.py up`, which builds its
+own auth/Mike/gateway with their own keys and databases):
+`python3 tools/headless-e2e.py` — enrollment, grants, a real Mike web turn
+in Chromium, the question/notification/answer path with the page closed,
+scope and owner refusals, bounds, network loss, crash, duplicate delivery,
+offline targets, expiry, revocation and output hygiene.
 
 Every boundary is real except the document portal's final call, which
 `MIKE_OPEN_LOG` replaces with a recorder; every device the run pairs is

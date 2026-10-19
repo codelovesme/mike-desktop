@@ -42,8 +42,18 @@ device_refused = false
 sessions = []
 turns = []
 session_serial = 0
+| Headless (ticket 160): a server enrolled with a code the person confirmed
+| elsewhere. It speaks to the gateway with its device credential alone, and
+| runs only what an owner's grant on this machine covers.
+headless = false
+enrollment = null
+grants = []
+seen_tasks = []
 
 Capabilities =>
+    | A server has no person at the screen to pick a folder or see a file.
+    if headless
+        return DeviceCapabilities { items = ["terminal"] }
     return DeviceCapabilities { items = ["file_search", "file_open", "terminal"] }
 
 | Only the fixed public service or an explicit loopback test host. No task
@@ -264,6 +274,8 @@ StartService =>
     if was_revoked ∈ ReadText
         revoked_latch = true
         connection = "revoked"
+    if not revoked_latch
+        emit LoadHeadless to this
     running = true
     emit Notice { text = "ready for local clients on 127.0.0.1:" + listen_port + " (protocol " + protocol_version + ", host " + host_url + ")" } to this
     return ServiceStarted
@@ -282,6 +294,9 @@ ApiCall { app, particle } =>
     return parsed.value
 
 Gateway { particle } =>
+    if headless and credential ≠ ""
+        emit ApiCall { app = "mike-interface", particle = Open { particle = particle } } to this get device_answer
+        return device_answer
     if account_token = ""
         return ApiUnavailable
     emit ApiCall { app = "mike-interface", particle = Impulse { token = account_token, particle = particle } } to this get answer
@@ -306,6 +321,7 @@ LoadIdentity { owner } =>
     return SavedIdentity { device_id = saved_id.text, credential = saved_secret.text }
 
 SaveIdentity { owner, id, secret } =>
+    emit Run { command = "rm", args = ["-f", "--", state_dir + "/mode"] } to proc
     emit WritePrivate { path = state_dir + "/owner", text = owner } to this get one
     emit WritePrivate { path = state_dir + "/device_id", text = id } to this get two
     emit WritePrivate { path = state_dir + "/credential", text = secret } to this get three
@@ -313,8 +329,12 @@ SaveIdentity { owner, id, secret } =>
         return NotWritten
     return Written
 
+| Grants and delivered-task ids belong to one device: they go with it.
 ForgetIdentity =>
-    emit Run { command = "rm", args = ["-f", "--", state_dir + "/owner", state_dir + "/device_id", state_dir + "/credential"] } to proc
+    emit Run { command = "rm", args = ["-f", "--", state_dir + "/owner", state_dir + "/device_id", state_dir + "/credential", state_dir + "/mode", state_dir + "/grants", state_dir + "/seen"] } to proc
+    grants = []
+    seen_tasks = []
+    headless = false
     return Forgotten
 
 | ---- Mike Desktop's pairing, carried over once ----
@@ -438,6 +458,8 @@ ConnectAccount { token, email } =>
 
 ClearAccount =>
     account_token = ""
+    if headless
+        return Cleared
     account_email = ""
     device_id = ""
     credential = ""
@@ -462,6 +484,7 @@ EndGeneration { reason, detail, can_report } =>
 LoseDevice { detail } =>
     emit EndGeneration { reason = "device_revoked", detail = detail, can_report = false } to this
     emit ForgetIdentity to this
+    account_email = ""
     emit ClearInflight to this
     recovery = null
     emit ClearAccount to this
@@ -475,8 +498,10 @@ LoseDevice { detail } =>
 ServiceTick =>
     emit Timestamp to core get now
     emit ExpireSessions { now = now.value } to this
-    if account_token ≠ "" and credential ≠ ""
+    if credential ≠ "" and (account_token ≠ "" or headless)
         emit Pulse to this
+    if enrollment ≠ null
+        emit PollEnrollment { now = now.value } to this
     emit AdvanceWork { now = now.value } to this
     if device_refused
         device_refused = false
@@ -486,7 +511,8 @@ ServiceTick =>
 
 Pulse =>
     emit Capabilities to this get offered
-    emit Gateway { particle = Heartbeat { device_id = device_id, credential = credential, capabilities = offered.items } } to this get pulse
+    emit AdvertisedGrants to this get advertised
+    emit Gateway { particle = Heartbeat { device_id = device_id, credential = credential, capabilities = offered.items, grants = advertised.items } } to this get pulse
     if pulse ∈ Forbidden
         emit LoseDevice { detail = "this computer's access was revoked" } to this
         return Revoked
@@ -498,6 +524,8 @@ Pulse =>
         connection = "offline"
         return Offline
     connection = "connected"
+    if pulse.revoked_grants ∈ Array and pulse.revoked_grants ≠ []
+        emit DropGrants { ids = pulse.revoked_grants, why = "revoked by the owner in Mike" } to this
     if recovery ≠ null
         emit ReportRecovery to this
     if work ≠ null
@@ -540,6 +568,9 @@ ReceiveWork { task } =>
         argv = task.argv
         cwd = task.cwd
     if task ∈ InterfaceTask, goal = task.goal
+    grant_id = ""
+    if task ∈ TerminalStep and task.grant_id ∈ String, grant_id = task.grant_id
+    emit SeenBefore { id = task.id } to this get repeated
     work = {
         id = task.id
         kind = kind
@@ -561,16 +592,40 @@ ReceiveWork { task } =>
         stop_requested = false
         report = null
         report_until = now.value + 290
+        grant_id = grant_id
+        timeout = 60
     }
     emit MarkInflight { stage = "claimed" } to this
     emit Remember { entry = { kind = "requested", text = goal, id = task.id, argv = argv, cwd = cwd, state = "", exit_code = null, stdout = "", stderr = "" } } to this
     if approval ∉ Token
         emit FinishWork { state = "failed", exit_code = null, stdout = "", stderr = "the local service had no random source for the approval", outcome = "failed", detail = "the local service could not prepare the approval" } to this
         return WorkReceived
+    | Delivered again (a gateway retry, a restored inbox): what this service
+    | already received is never run a second time.
+    if repeated.yes
+        emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "this step was delivered again; this computer already received it once and does not repeat it", outcome = "failed", detail = "this task was delivered again; it is not repeated" } to this
+        return WorkReceived
     if kind = "terminal"
         valid = argv ∈ Array and argv ≠ [] and cwd ∈ String and cwd ≠ ""
         if not valid
             emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "the step had no valid command", outcome = "failed", detail = "" } to this
+            return WorkReceived
+        if grant_id ≠ ""
+            emit GrantCheck { grant_id = grant_id, argv = argv, cwd = cwd, confirmed = task.confirmed = true } to this get allowed
+            if allowed ∉ GrantAllows
+                emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "outside this computer's grant: " + allowed.reason + "; it did not run", outcome = "failed", detail = "" } to this
+                return WorkReceived
+            work = work + { cwd = allowed.cwd, timeout = allowed.timeout, approver = "grant:" + grant_id }
+            emit Note { text = "Running under grant " + grant_id + " without a local approval." } to this
+            emit StartTerminal to this
+            return WorkReceived
+        | Pairing grants nothing: a server runs no step without a grant, and
+        | has no window where a person could approve one.
+        if headless
+            emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "no grant on this server covers this step; it did not run", outcome = "failed", detail = "" } to this
+            return WorkReceived
+    if kind = "file" and headless
+        emit FinishWork { state = "", exit_code = null, stdout = "", stderr = "", outcome = "failed", detail = "this server has no person at a screen to choose or open a file" } to this
     return WorkReceived
 
 | The task waits for an approval-capable client. A claim by a session that
@@ -584,7 +639,7 @@ AdvanceWork { now } =>
     if work.stage = "reporting"
         emit DeliverReport to this
         return Advanced
-    if work.approver ≠ ""
+    if work.approver ≠ "" and work.grant_id = ""
         emit SessionById { id = work.approver } to this get approver
         if approver ∉ SessionFound
             work = work + { approver = "" }
@@ -742,7 +797,7 @@ StartTerminal =>
     name = "step-" + spawned
     request_path = runtime_dir + "/" + name + ".request"
     result_path = runtime_dir + "/" + name + ".result"
-    emit Stringify { value = { argv = work.argv, cwd = work.cwd, timeout_seconds = 60, report_bytes = 4096 } } to json get request
+    emit Stringify { value = { argv = work.argv, cwd = work.cwd, timeout_seconds = work.timeout, report_bytes = 4096 } } to json get request
     emit WritePrivate { path = request_path, text = request.value } to this get wrote
     if wrote ∉ Written
         emit FinishWork { state = "failed", exit_code = null, stdout = "", stderr = "the local service could not prepare the command", outcome = "", detail = "" } to this
@@ -778,7 +833,7 @@ CheckWorker { now } =>
     emit Status { id = work.process_id } to proc get status
     alive = status ∈ StatusResult and status.alive
     if alive
-        limit = 75
+        limit = work.timeout + 15
         if work.kind = "file", limit = 150
         if now - work.started_at ≤ limit
             return StillRunning
@@ -842,6 +897,11 @@ CollectTerminal =>
                 if state = "cancelled" and work.stop_requested and stderr = ""
                     stderr = "stopped locally"
         emit Run { command = "rm", args = ["-f", "--", work.request_path, work.result_path] } to proc
+        | Stopped before the worker could install its handler: it never
+        | started the command (that happens after), so this is a stop.
+        if state = "failed" and stdout = "" and work.stop_requested
+            state = "cancelled"
+            stderr = "stopped before the worker reported; the command had not started"
     return Collected { state = state, exit_code = exit_code, stdout = stdout, stderr = stderr }
 
 | ======== Local client protocol ========
@@ -938,6 +998,15 @@ Route { method, path, body, headers } =>
     if path = "/v1/device/revoke"
         emit RevokeThisDevice to this get revoked
         return revoked
+    if path = "/v1/enroll/start"
+        emit StartEnrollment { session = session, request = request } to this get enrolling
+        return enrolling
+    if path = "/v1/grants/add"
+        emit AddGrant { session = session, request = request } to this get added
+        return added
+    if path = "/v1/grants/revoke"
+        emit RevokeGrantLocally { session = session, request = request } to this get dropped
+        return dropped
     if path = "/v1/chat/ask"
         emit ChatAsk { session = session, request = request } to this get asked
         return asked
@@ -983,7 +1052,7 @@ DropSession { id } =>
     loop one over sessions
         if one.id ≠ id, kept += [one]
     sessions = kept
-    if work ≠ null and work.approver = id
+    if work ≠ null and work.approver = id and work.grant_id = ""
         work = work + { approver = "" }
     return Dropped
 
@@ -993,7 +1062,7 @@ ExpireSessions { now } =>
     loop one over sessions
         if now - one.seen ≤ 45, kept += [one]
     sessions = kept
-    if work ≠ null and work.approver ≠ ""
+    if work ≠ null and work.approver ≠ "" and work.grant_id = ""
         emit SessionById { id = work.approver } to this get holder
         if holder ∉ SessionFound
             work = work + { approver = "" }
@@ -1029,6 +1098,13 @@ Attach { request } =>
                 return latched
             if account_email ≠ "" and account_email ≠ account.email
                 emit EndGeneration { reason = "account_changed", detail = "the account on this computer changed", can_report = true } to this
+                | A server enrolled for the old account is withdrawn, not left behind.
+                if headless
+                    emit Gateway { particle = RevokeSelf { device_id = device_id, credential = credential } } to this
+                    emit ForgetIdentity to this
+                    account_email = ""
+                    device_id = ""
+                    credential = ""
                 emit ClearAccount to this
             emit ConnectAccount { token = request.token, email = account.email } to this get connected
             if connected ∉ Connected
@@ -1073,6 +1149,12 @@ StateFor { session } =>
         if session.approvals and awaiting, approval_id = work.approval_id
         view = { id = work.id, kind = work.kind, stage = work.stage, claim = claim, approval_id = approval_id, argv = work.argv, cwd = work.cwd, goal = work.goal, folder = work.folder, file = work.file, seconds_left = work.deadline - now.value }
     emit Capabilities to this get offered
+    enrollment_view = null
+    if enrollment ≠ null
+        enrollment_view = { state = enrollment.state, user_code = enrollment.user_code, account = enrollment.account, name = enrollment.name, seconds_left = enrollment.expires_at - now.value, detail = enrollment.detail }
+    grant_view = []
+    loop grant over grants
+        grant_view += [grant + { seconds_left = grant.expires_at - now.value }]
     value = {
         protocol = protocol_version
         service = service_version
@@ -1088,6 +1170,9 @@ StateFor { session } =>
         approval_clients = approval_clients
         work = view
         activity = activity
+        headless = headless
+        enrollment = enrollment_view
+        grants = grant_view
     }
     return StateView { value = value }
 
@@ -1200,17 +1285,27 @@ SignOut { detail } =>
 | Ends this device for good: the gateway marks it revoked, the pairing is
 | deleted here, and pairing again needs an explicit connect.
 RevokeThisDevice =>
-    if account_token = "" or credential = ""
+    if credential = "" or (account_token = "" and not headless)
         emit Fail { status = 409, error = "not_paired", message = "this computer has no active pairing" } to this get none
         return none
     revoked_id = device_id
+    revoked_secret = credential
     emit EndGeneration { reason = "device_revoked", detail = "this computer's pairing was revoked", can_report = true } to this
-    emit Gateway { particle = RevokeDevice { device_id = revoked_id } } to this get revoked
+    revoked = ApiUnavailable
+    if headless
+        emit Gateway { particle = RevokeSelf { device_id = revoked_id, credential = revoked_secret } } to this get self_revoked
+        revoked = self_revoked
+    if not headless
+        emit Gateway { particle = RevokeDevice { device_id = revoked_id } } to this get owner_revoked
+        revoked = owner_revoked
     remote = revoked ∈ DeviceRevoked
     emit ForgetIdentity to this
     emit ClearInflight to this
     recovery = null
     emit ClearAccount to this
+    account_email = ""
+    device_id = ""
+    credential = ""
     connection = "revoked"
     emit RememberRevocation to this
     emit Notice { text = "this computer's pairing was revoked by a local client" } to this
@@ -1232,7 +1327,7 @@ ChatAsk { session, request } =>
     if request.text ∉ String or request.text = ""
         emit Fail { status = 400, error = "bad_request", message = "text is required" } to this get empty
         return empty
-    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text } } } to this get started
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text, device_id = device_id } } } to this get started
     if started ∉ Thinking
         emit Fail { status = 503, error = "mike_unavailable", message = "Mike did not start the turn" } to this get unavailable
         return unavailable
@@ -1270,3 +1365,348 @@ ChatConfirm { session, request } =>
         emit Fail { status = 503, error = "mike_unavailable", message = "the decision did not reach Mike" } to this get unavailable
         return unavailable
     return Answer { status = 200, value = { sent = true } }
+
+| ======== Headless servers: enrollment and grants (ticket 160) ========
+|
+| Enrollment binds this machine to an account without a browser here: the
+| gateway shows nothing secret to anyone, this service keeps the credential
+| it made itself, and the person enters the short code on an interface where
+| they are signed in. The operator names the account they expect; a code
+| confirmed by any other account is revoked at once.
+|
+| A grant is the owner's explicit, local permission for unattended work: one
+| project directory, the argument-list prefixes that run (`run`) or that
+| first need the owner's yes in Mike (`ask`), an expiry and a time bound.
+| It is made only by this OS user through the local protocol, bound to the
+| current owner and device, and checked here on every step — whatever the
+| gateway or the model sent. It is NOT a sandbox: a granted command runs
+| with all of this OS user's rights (no root: privilege gain is disabled),
+| and the directory only says where it starts, not what it may touch.
+
+LoadHeadless =>
+    emit ReadPrivate { path = state_dir + "/mode" } to this get mode
+    if mode ∉ ReadText or mode.text ≠ "headless"
+        return NotHeadless
+    emit ReadPrivate { path = state_dir + "/owner" } to this get saved_owner
+    if saved_owner ∉ ReadText or saved_owner.text = ""
+        return NotHeadless
+    emit LoadIdentity { owner = saved_owner.text } to this get saved
+    if saved ∉ SavedIdentity
+        return NotHeadless
+    headless = true
+    account_email = saved_owner.text
+    device_id = saved.device_id
+    credential = saved.credential
+    connection = "offline"
+    emit ReadPrivate { path = state_dir + "/grants" } to this get saved_grants
+    if saved_grants ∈ ReadText
+        emit Parse { text = saved_grants.text } to json get parsed
+        if parsed ∉ Exception and parsed.value ∈ Array, grants = parsed.value
+    emit ReadPrivate { path = state_dir + "/seen" } to this get saved_seen
+    if saved_seen ∈ ReadText
+        emit Parse { text = saved_seen.text } to json get parsed_seen
+        if parsed_seen ∉ Exception and parsed_seen.value ∈ Array, seen_tasks = parsed_seen.value
+    emit Notice { text = "headless device loaded; it runs only what its grants cover" } to this
+    return HeadlessLoaded
+
+StartEnrollment { session, request } =>
+    if not session.approvals
+        emit Fail { status = 403, error = "approvals_not_allowed", message = "this client attached without control capability" } to this get denied
+        return denied
+    if credential ≠ ""
+        emit Fail { status = 409, error = "already_paired", message = "this computer is already paired; revoke that pairing first" } to this get paired
+        return paired
+    expected = request.account
+    if expected ∉ String or expected = ""
+        emit Fail { status = 400, error = "account_required", message = "name the account that will confirm the code" } to this get anonymous
+        return anonymous
+    emit Length { value = expected } to core get expected_size
+    if expected_size.value > 200
+        emit Fail { status = 400, error = "account_required", message = "the account name is too long" } to this get long_account
+        return long_account
+    name = ""
+    if request.name ∈ String, name = request.name
+    if name = ""
+        name = "Mike server"
+        emit Run { command = "uname", args = ["-n"] } to proc get machine
+        if machine ∉ Exception and machine.success
+            emit Trim { value = machine.stdout } to strs get host_name
+            if host_name.value ≠ "", name = "Mike on " + host_name.value
+    emit Length { value = name } to core get name_size
+    if name_size.value > 80
+        emit Fail { status = 400, error = "bad_request", message = "the name is too long" } to this get long_name
+        return long_name
+    emit RandomToken to this get secret
+    if secret ∉ Token
+        emit Fail { status = 503, error = "no_random_source", message = "could not create a device credential" } to this get no_secret
+        return no_secret
+    emit ApiCall { app = "mike-interface", particle = Open { particle = BeginEnrollment { name = name, platform = "linux", credential = secret.value } } } to this get started
+    if started ∉ EnrollmentStarted
+        reason = "the device gateway could not start an enrollment"
+        if started ∈ Rejected, reason = started.reason
+        emit Fail { status = 503, error = "gateway_unavailable", message = reason } to this get unavailable
+        return unavailable
+    emit Timestamp to core get now
+    enrollment = { id = started.enrollment_id, user_code = started.user_code, account = expected, name = name, secret = secret.value, state = "pending", expires_at = now.value + started.expires_in, detail = "" }
+    emit Notice { text = "enrollment started for " + expected + "; waiting for the code to be confirmed in Mike" } to this
+    return Answer { status = 200, value = { user_code = started.user_code, expires_in = started.expires_in, name = name, account = expected } }
+
+PollEnrollment { now } =>
+    if enrollment = null or enrollment.state ≠ "pending"
+        return NoEnrollment
+    if now ≥ enrollment.expires_at
+        enrollment = enrollment + { state = "expired", detail = "the code expired before it was confirmed" }
+        return EnrollmentEnded
+    emit ApiCall { app = "mike-interface", particle = Open { particle = PollEnrollment { enrollment_id = enrollment.id, credential = enrollment.secret } } } to this get polled
+    if polled ∈ EnrollmentExpired or polled ∈ Forbidden
+        enrollment = enrollment + { state = "expired", detail = "the gateway no longer knows this enrollment" }
+        return EnrollmentEnded
+    if polled ∉ EnrollmentConfirmed
+        return EnrollmentWaiting
+    if polled.owner ≠ enrollment.account
+        emit ApiCall { app = "mike-interface", particle = Open { particle = RevokeSelf { device_id = polled.device_id, credential = enrollment.secret } } } to this
+        enrollment = enrollment + { state = "refused", detail = "the code was confirmed by " + polled.owner + ", not " + enrollment.account + "; that pairing was revoked at once" }
+        emit Notice { text = "enrollment refused: confirmed by an unexpected account; the pairing was revoked" } to this
+        return EnrollmentEnded
+    emit SaveIdentity { owner = polled.owner, id = polled.device_id, secret = enrollment.secret } to this get stored
+    emit WritePrivate { path = state_dir + "/mode", text = "headless" } to this get marked
+    headless = true
+    account_email = polled.owner
+    device_id = polled.device_id
+    credential = enrollment.secret
+    connection = "offline"
+    revoked_latch = false
+    grants = []
+    seen_tasks = []
+    emit Run { command = "rm", args = ["-f", "--", state_dir + "/revoked", state_dir + "/grants", state_dir + "/seen"] } to proc
+    detail = "enrolled as " + polled.name + " for " + polled.owner + "; it runs nothing until a grant is added here"
+    if stored ∉ Written or marked ∉ Written
+        detail = detail + " (the pairing could not be saved privately and will be lost on restart)"
+    enrollment = enrollment + { state = "confirmed", detail = detail, secret = "" }
+    emit Notice { text = "enrolled this server as a headless device for " + polled.owner + "; no grants yet" } to this
+    return EnrollmentEnded
+
+SaveGrants =>
+    emit Stringify { value = grants } to json get text
+    emit WritePrivate { path = state_dir + "/grants", text = text.value } to this get wrote
+    return wrote
+
+| Words of one prefix, split on spaces: "git status" → ["git", "status"].
+PrefixWords { text } =>
+    if text ∉ String
+        return Words { ok = false, items = [] }
+    emit Split { value = text, separator = " " } to strs get parts
+    words = []
+    loop part over parts.value
+        if part ≠ "", words += [part]
+    emit Length { value = words } to core get count
+    if count.value < 1 or count.value > 8
+        return Words { ok = false, items = [] }
+    loop word over words
+        emit Length { value = word } to core get size
+        if size.value > 200
+            return Words { ok = false, items = [] }
+    return Words { ok = true, items = words }
+
+PrefixList { items } =>
+    if items = null
+        return Prefixes { ok = true, items = [] }
+    if items ∉ Array
+        return Prefixes { ok = false, items = [] }
+    emit Length { value = items } to core get count
+    if count.value > 32
+        return Prefixes { ok = false, items = [] }
+    kept = []
+    loop one over items
+        emit PrefixWords { text = one } to this get words
+        if not words.ok
+            return Prefixes { ok = false, items = [] }
+        kept += [words.items]
+    return Prefixes { ok = true, items = kept }
+
+AddGrant { session, request } =>
+    if not session.approvals
+        emit Fail { status = 403, error = "approvals_not_allowed", message = "this client attached without control capability" } to this get denied
+        return denied
+    if user_id = "0"
+        emit Fail { status = 403, error = "root_refused", message = "grants are refused for root: every granted command would run with root's rights" } to this get as_root
+        return as_root
+    if credential = "" or account_email = "" or device_id = ""
+        emit Fail { status = 409, error = "not_paired", message = "pair or enroll this computer before granting work" } to this get unpaired
+        return unpaired
+    root = request.root
+    if root ∉ String or root = "" or root[0, 1) ≠ "/"
+        emit Fail { status = 400, error = "invalid_root", message = "the project directory must be an absolute path" } to this get relative
+        return relative
+    emit Run { command = "realpath", args = ["-e", "--", root] } to proc get resolved
+    if resolved ∈ Exception or not resolved.success
+        emit Fail { status = 400, error = "invalid_root", message = "the project directory does not exist" } to this get missing_root
+        return missing_root
+    emit Trim { value = resolved.stdout } to strs get real_root
+    emit Run { command = "test", args = ["-d", real_root.value] } to proc get is_dir
+    if is_dir ∈ Exception or not is_dir.success
+        emit Fail { status = 400, error = "invalid_root", message = "the project path is not a directory" } to this get not_dir
+        return not_dir
+    minutes = 480
+    if request.minutes ≠ null
+        if request.minutes ∉ Number or request.minutes < 1 or request.minutes > 43200
+            emit Fail { status = 400, error = "bad_request", message = "minutes must be between 1 and 43200 (30 days)" } to this get bad_minutes
+            return bad_minutes
+        minutes = request.minutes
+    timeout = 60
+    if request.timeout_seconds ≠ null
+        if request.timeout_seconds ∉ Number or request.timeout_seconds < 1 or request.timeout_seconds > 180
+            emit Fail { status = 400, error = "bad_request", message = "timeout_seconds must be between 1 and 180" } to this get bad_timeout
+            return bad_timeout
+        timeout = request.timeout_seconds
+    emit PrefixList { items = request.run } to this get run
+    emit PrefixList { items = request.ask } to this get ask
+    if not run.ok or not ask.ok
+        emit Fail { status = 400, error = "bad_request", message = "run and ask are lists of up to 32 commands of 1 to 8 words" } to this get bad_prefix
+        return bad_prefix
+    if run.items = [] and ask.items = []
+        emit Fail { status = 400, error = "bad_request", message = "grant at least one command" } to this get empty
+        return empty
+    emit Length { value = grants } to core get held
+    if held.value ≥ 16
+        emit Fail { status = 409, error = "too_many_grants", message = "this computer holds 16 grants; revoke one first" } to this get crowded
+        return crowded
+    | Tools the grant names but this machine lacks are recorded, so Mike is
+    | told "not installed" instead of sending a step that cannot start.
+    missing = []
+    loop prefix over run.items + ask.items
+        tool = prefix[0]
+        known = false
+        loop one over missing
+            if one = tool, known = true
+        if not known
+            emit Run { command = "sh", args = ["-c", "command -v -- \"\$1\" >/dev/null 2>&1", "mike-grant", tool] } to proc get found
+            if found ∈ Exception or not found.success, missing += [tool]
+    emit RandomToken to this get token
+    if token ∉ Token
+        emit Fail { status = 503, error = "no_random_source", message = "could not name the grant" } to this get no_id
+        return no_id
+    emit Timestamp to core get now
+    grant = { id = "g" + token.value[0, 12), owner = account_email, device_id = device_id, root = real_root.value, run = run.items, ask = ask.items, created_at = now.value, expires_at = now.value + minutes * 60, timeout_seconds = timeout, missing = missing }
+    grants += [grant]
+    emit SaveGrants to this get saved
+    if saved ∉ Written
+        emit Note { text = "The grant could not be saved privately; it lasts until this service stops." } to this
+    emit Note { text = "Grant " + grant.id + " added for " + grant.root + "." } to this
+    emit Notice { text = "grant " + grant.id + " added for " + grant.root + " (" + minutes + " min)" } to this
+    return Answer { status = 200, value = { grant = grant } }
+
+RevokeGrantLocally { session, request } =>
+    if not session.approvals
+        emit Fail { status = 403, error = "approvals_not_allowed", message = "this client attached without control capability" } to this get denied
+        return denied
+    known = false
+    loop grant over grants
+        if grant.id = request.grant_id, known = true
+    if not known
+        emit Fail { status = 404, error = "unknown_grant", message = "no such grant on this computer" } to this get unknown
+        return unknown
+    emit DropGrants { ids = [request.grant_id], why = "revoked on this computer" } to this
+    return Answer { status = 200, value = { revoked = true } }
+
+| Removing a grant also stops a command running under it; the result says
+| it was stopped. The gateway is told on the next heartbeat (the grant is
+| no longer advertised); while it cannot be reached nothing new arrives.
+DropGrants { ids, why } =>
+    kept = []
+    dropped = []
+    loop grant over grants
+        gone = false
+        loop one over ids
+            if one = grant.id, gone = true
+        if gone, dropped += [grant.id]
+        if not gone, kept += [grant]
+    if dropped = []
+        return NothingDropped
+    grants = kept
+    emit SaveGrants to this
+    loop one over dropped
+        emit Note { text = "Grant " + one + " was " + why + "." } to this
+        if work ≠ null and work.grant_id = one and work.stage = "running"
+            work = work + { stop_requested = true }
+            emit StopWorker { force = false } to this
+    emit Notice { text = "grant removed: " + why } to this
+    return GrantsDropped
+
+| What the gateway is told: active grants of this owner and device. Expired
+| ones are pruned here, so expiry holds even without the gateway.
+AdvertisedGrants =>
+    emit Timestamp to core get now
+    kept = []
+    shown = []
+    loop grant over grants
+        if grant.expires_at > now.value
+            kept += [grant]
+            if grant.owner = account_email and grant.device_id = device_id
+                shown += [{ id = grant.id, root = grant.root, run = grant.run, ask = grant.ask, expires_at = grant.expires_at, missing = grant.missing, timeout_seconds = grant.timeout_seconds }]
+    if kept ≠ grants
+        grants = kept
+        emit SaveGrants to this
+        emit Note { text = "An expired grant was removed." } to this
+    return Advertised { items = shown }
+
+Covers { prefixes, argv } =>
+    emit Length { value = argv } to core get argc
+    loop prefix over prefixes
+        emit Length { value = prefix } to core get words
+        if words.value ≤ argc.value and argv[0, words.value) = prefix
+            return Covered { yes = true }
+    return Covered { yes = false }
+
+| The local decision for one delivered step, made from this machine's own
+| grant, never from what the gateway says about it. The directory is
+| resolved here (symlinks, `..`) and must stay inside the grant's root.
+GrantCheck { grant_id, argv, cwd, confirmed } =>
+    found = null
+    loop grant over grants
+        if grant.id = grant_id, found = grant
+    if found = null
+        return GrantRefuses { reason = "there is no grant " + grant_id + " here" }
+    if found.owner ≠ account_email or found.device_id ≠ device_id
+        return GrantRefuses { reason = "the grant belongs to another owner or device" }
+    emit Timestamp to core get now
+    if now.value ≥ found.expires_at
+        return GrantRefuses { reason = "the grant expired" }
+    emit Covers { prefixes = found.run, argv = argv } to this get runs
+    emit Covers { prefixes = found.ask, argv = argv } to this get asks
+    if not runs.yes and not asks.yes
+        return GrantRefuses { reason = "`" + argv[0] + "` with these arguments is not granted" }
+    if not runs.yes and not confirmed
+        return GrantRefuses { reason = "this command needs the owner's yes in Mike first" }
+    loop tool over found.missing
+        if tool = argv[0]
+            return GrantRefuses { reason = "`" + tool + "` is not installed here" }
+    emit Run { command = "realpath", args = ["-e", "--", cwd] } to proc get resolved
+    if resolved ∈ Exception or not resolved.success
+        return GrantRefuses { reason = "the working directory does not exist" }
+    emit Trim { value = resolved.stdout } to strs get real
+    emit Run { command = "test", args = ["-d", real.value] } to proc get is_dir
+    if is_dir ∈ Exception or not is_dir.success
+        return GrantRefuses { reason = "the working directory is not a directory" }
+    inside = real.value = found.root or found.root = "/"
+    if not inside
+        emit Length { value = real.value } to core get real_size
+        emit Length { value = found.root } to core get root_size
+        if real_size.value > root_size.value + 1
+            inside = real.value[0, root_size.value + 1) = found.root + "/"
+    if not inside
+        return GrantRefuses { reason = "the working directory resolves outside " + found.root }
+    return GrantAllows { cwd = real.value, timeout = found.timeout_seconds }
+
+| Delivered-task ids this service has received, kept across restarts.
+SeenBefore { id } =>
+    loop one over seen_tasks
+        if one = id
+            return Seen { yes = true }
+    seen_tasks += [id]
+    emit Length { value = seen_tasks } to core get count
+    if count.value > 64
+        seen_tasks = seen_tasks[count.value - 64, length)
+    emit Stringify { value = seen_tasks } to json get text
+    emit WritePrivate { path = state_dir + "/seen", text = text.value } to this
+    return Seen { yes = false }

@@ -3,6 +3,7 @@
 #   mike-service run          run in the foreground (what the user unit runs)
 #   mike-service start|stop|status|restart
 #   mike-service install-unit | uninstall-unit
+#   mike-service enroll --account EMAIL | unenroll | grant add|list|revoke
 set -eu
 launcher_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
 here=$launcher_dir
@@ -12,7 +13,7 @@ fi
 command=${1:-}
 case "$command" in
   --version|-V) printf 'mike-service %s (local protocol 1; Code >= 2.12.1 < 2.15.0)\n' "$(cat "$here/VERSION" 2>/dev/null || printf dev)"; exit 0 ;;
-  --help|-h|'') sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --help|-h|'') sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   run) ;;
   *)
     [ -x /usr/bin/python3 ] || { echo 'mike-service: Python 3 is needed for service control' >&2; exit 1; }

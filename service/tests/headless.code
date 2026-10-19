@@ -1,0 +1,333 @@
+| Ticket 160: a headless server. Enrollment by a code confirmed elsewhere,
+| grants made by this OS user, and the local decision on every delivered
+| step — whatever the gateway sent. Every OS and network boundary is a mock.
+
+link "support/process_mock.so" as proc
+link "support/http_mock.so" as http
+link "support/server_mock.so" as local
+link "support/timer_mock.so" as clock
+link "../.code/modules/json.so" as json
+link "../.code/modules/strings.so" as strs
+link "../.code/modules/env.so" as system_env
+link "../src/files.gene.code"
+link "../src/companion.gene.code"
+
+Call { method, path, body, bearer } =>
+    headers = { host = "127.0.0.1:40123", "x-mike-protocol" = "1", authorization = "Bearer " + bearer }
+    emit Request { method = method, path = path, body = body, headers = headers } to this get answered
+    emit Parse { text = answered.body } to json get parsed
+    return Called { status = answered.status, value = parsed.value }
+
+Includes { text, needle } =>
+    emit Length { value = text } to core get size
+    emit Length { value = needle } to core get width
+    i = 0
+    loop
+        if i + width.value > size.value
+            break
+        if text[i, i + width.value) = needle
+            return Inclusion { yes = true }
+        i += 1
+    return Inclusion { yes = false }
+
+| Every body posted since the last look, parsed.
+Posts =>
+    emit Posted to http get record
+    items = []
+    loop one over record.items
+        emit Parse { text = one.body } to json get parsed
+        items += [parsed.value]
+    emit Forget to http
+    return PostList { items = items }
+
+| The inner particle class of each post (Open or Impulse envelope).
+Classes { posts } =>
+    names = []
+    loop one over posts
+        names += [one._class + ":" + one.particle._class]
+    return ClassList { items = names }
+
+Workers =>
+    emit Ran to proc get record
+    count = 0
+    last = null
+    loop one over record.items
+        if one.spawned and one.command = "/bin/sh"
+            count += 1
+    loop one over record.items
+        if one.command = "install" and one.stdin ∈ String
+            emit Includes { text = one.stdin, needle = "timeout_seconds" } to this get is_request
+            if is_request.yes, last = one.stdin
+    return WorkerCount { count = count, request = last }
+
+| Deliver one step on a tick and return what the service reported for it.
+| (A record's `_class` does not survive Stringify, so the class is put in front.)
+Deliver { kind, step } =>
+    emit Stringify { value = step } to json get body
+    emit Reply { body = "{\"_class\":\"DeviceOnline\",\"device_id\":\"srv-1\",\"at\":5,\"revoked_grants\":[]}" } to http
+    emit Reply { body = "{\"_class\":\"" + kind + "\"," + body.value[1, length) } to http
+    emit Reply { body = "{\"_class\":\"TaskCompleted\",\"id\":\"" + step.id + "\",\"replayed\":false}" } to http
+    emit ServiceTick to this
+    emit Posts to this get sent
+    report = null
+    loop one over sent.items
+        if one.particle._class = "CompleteTerminalStep", report = one.particle
+    return Delivered { report = report, posts = sent.items }
+
+emit Respond { command = "id", arg = "", stdout = "1000\n", code = 0 } to proc
+emit Respond { command = "stat", arg = "", stdout = "directory:1000:700\n", code = 0 } to proc
+emit Respond { command = "pwd", arg = "", stdout = "/svc\n", code = 0 } to proc
+emit Respond { command = "sh", arg = "", stdout = "4242\n", code = 0 } to proc
+emit Respond { command = "uname", arg = "", stdout = "buildbox\n", code = 0 } to proc
+emit Respond { command = "cat", arg = "", stdout = "", code = 1 } to proc
+emit StartService to this get started
+assert started ∈ ServiceStarted
+key = "aaaaaaaabbbbccccdddd00000000000111111111222233334444555555555555"
+
+emit Call { method = "POST", path = "/v1/attach", body = "{\"client\":\"mike-service control\",\"approvals\":true}", bearer = key } to this get control
+assert control.status = 200
+ctl = control.value.session_token
+emit Call { method = "POST", path = "/v1/attach", body = "{\"client\":\"viewer\",\"approvals\":false}", bearer = key } to this get viewer
+view = viewer.value.session_token
+
+| Nothing to grant before this computer belongs to someone.
+emit Call { method = "POST", path = "/v1/grants/add", body = "{\"root\":\"/srv/app\",\"run\":[\"ls\"]}", bearer = ctl } to this get early_grant
+assert early_grant.status = 409
+
+| ---- Enrollment ----
+
+emit Call { method = "POST", path = "/v1/enroll/start", body = "{}", bearer = ctl } to this get no_account
+assert no_account.status = 400
+emit Call { method = "POST", path = "/v1/enroll/start", body = "{\"account\":\"ada@example.test\"}", bearer = view } to this get viewer_enroll
+assert viewer_enroll.status = 403
+emit Reply { body = "{\"_class\":\"EnrollmentStarted\",\"enrollment_id\":\"en-1\",\"user_code\":\"ABCD-EFGH\",\"expires_in\":600}" } to http
+emit Call { method = "POST", path = "/v1/enroll/start", body = "{\"account\":\"ada@example.test\"}", bearer = ctl } to this get begun
+assert begun.status = 200
+assert begun.value.user_code = "ABCD-EFGH"
+assert begun.value.name = "Mike on buildbox"
+emit Posts to this get begin_posts
+begin = begin_posts.items[0]
+assert begin._class = "Open"
+assert begin.particle._class = "BeginEnrollment"
+secret = begin.particle.credential
+emit Length { value = secret } to core get secret_size
+assert secret_size.value = 64
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = view } to this get waiting
+assert waiting.value.enrollment.state = "pending"
+emit Stringify { value = waiting.value } to json get waiting_text
+emit Includes { text = waiting_text.value, needle = secret } to this get leaked
+assert not leaked.yes
+
+| Confirmed by an account the operator did not name: revoked at once.
+emit Reply { body = "{\"_class\":\"EnrollmentPending\",\"enrollment_id\":\"en-1\"}" } to http
+emit ServiceTick to this
+emit Reply { body = "{\"_class\":\"EnrollmentConfirmed\",\"enrollment_id\":\"en-1\",\"device_id\":\"srv-x\",\"owner\":\"mallory@example.test\",\"name\":\"Mike on buildbox\"}" } to http
+emit Reply { body = "{\"_class\":\"DeviceRevoked\",\"device_id\":\"srv-x\",\"replayed\":false}" } to http
+emit ServiceTick to this
+emit Posts to this get refused_posts
+emit Classes { posts = refused_posts.items } to this get refused_classes
+assert refused_classes.items = ["Open:PollEnrollment", "Open:PollEnrollment", "Open:RevokeSelf"]
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = view } to this get refused
+assert refused.value.enrollment.state = "refused"
+assert not refused.value.paired
+
+| The expected account confirms.
+emit Reply { body = "{\"_class\":\"EnrollmentStarted\",\"enrollment_id\":\"en-2\",\"user_code\":\"JKLM-NPQR\",\"expires_in\":600}" } to http
+emit Call { method = "POST", path = "/v1/enroll/start", body = "{\"account\":\"ada@example.test\",\"name\":\"build server\"}", bearer = ctl } to this get begun_again
+emit Posts to this get second_begin
+secret = second_begin.items[0].particle.credential
+emit Reply { body = "{\"_class\":\"EnrollmentConfirmed\",\"enrollment_id\":\"en-2\",\"device_id\":\"srv-1\",\"owner\":\"ada@example.test\",\"name\":\"build server\"}" } to http
+emit ServiceTick to this
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = view } to this get enrolled
+assert enrolled.value.paired
+assert enrolled.value.headless
+assert enrolled.value.account = "ada@example.test"
+assert enrolled.value.capabilities = ["terminal"]
+assert enrolled.value.enrollment.state = "confirmed"
+emit Stringify { value = enrolled.value } to json get enrolled_text
+emit Includes { text = enrolled_text.value, needle = secret } to this get leaked_after
+assert not leaked_after.yes
+emit Posts to this get drained
+
+| ---- Pairing alone: no grant, nothing runs ----
+
+emit Deliver { kind = "TerminalStep", step = { id = "s-0", argv = ["ls"], cwd = "/srv/app", device_id = "srv-1" } } to this get ungranted
+emit Classes { posts = ungranted.posts } to this get beat_classes
+assert beat_classes.items[0] = "Open:Heartbeat"
+assert ungranted.posts[0].particle.credential = secret
+assert ungranted.posts[0].particle.grants = []
+assert ungranted.report.state = "rejected"
+emit Workers to this get after_ungranted
+assert after_ungranted.count = 0
+
+| ---- Grants: made here, by this OS user ----
+
+emit Call { method = "POST", path = "/v1/grants/add", body = "{\"root\":\"/srv/app\",\"run\":[\"ls\"]}", bearer = view } to this get viewer_grant
+assert viewer_grant.status = 403
+emit Call { method = "POST", path = "/v1/grants/add", body = "{\"root\":\"srv/app\",\"run\":[\"ls\"]}", bearer = ctl } to this get relative
+assert relative.status = 400
+emit Call { method = "POST", path = "/v1/grants/add", body = "{\"root\":\"/srv/app\",\"run\":[]}", bearer = ctl } to this get nothing
+assert nothing.status = 400
+emit Call { method = "POST", path = "/v1/grants/add", body = "{\"root\":\"/srv/app\",\"run\":[\"ls\"],\"minutes\":0}", bearer = ctl } to this get no_minutes
+assert no_minutes.status = 400
+emit Call { method = "POST", path = "/v1/grants/add", body = "{\"root\":\"/srv/app\",\"run\":[\"a b c d e f g h i\"]}", bearer = ctl } to this get long_prefix
+assert long_prefix.status = 400
+emit Call { method = "POST", path = "/v1/grants/add", body = "{\"root\":\"/srv/app\",\"run\":[\"ls\"],\"timeout_seconds\":600}", bearer = ctl } to this get long_timeout
+assert long_timeout.status = 400
+emit Respond { command = "realpath", arg = "/srv/app", stdout = "/srv/app\n", code = 0 } to proc
+emit Respond { command = "sh", arg = "cargo", stdout = "", code = 1 } to proc
+emit Call { method = "POST", path = "/v1/grants/add", body = "{\"root\":\"/srv/app\",\"run\":[\"ls\",\"git  status\",\"cargo test\"],\"ask\":[\"git push\"],\"minutes\":120,\"timeout_seconds\":120}", bearer = ctl } to this get added
+assert added.status = 200
+grant = added.value.grant
+gid = grant.id
+assert grant.root = "/srv/app"
+assert grant.run = [["ls"], ["git", "status"], ["cargo", "test"]]
+assert grant.ask = [["git", "push"]]
+assert grant.missing = ["cargo"]
+assert grant.owner = "ada@example.test"
+assert grant.device_id = "srv-1"
+
+| ---- Steps under the grant run without a local approval ----
+
+emit Respond { command = "realpath", arg = "/srv/app/src", stdout = "/srv/app/src\n", code = 0 } to proc
+emit Alive { alive = true, code = null } to proc
+emit Deliver { kind = "TerminalStep", step = { id = "s-1", argv = ["git", "status", "--short"], cwd = "/srv/app/src", device_id = "srv-1", grant_id = gid, confirmed = false } } to this get granted
+emit Classes { posts = granted.posts } to this get granted_classes
+assert granted_classes.items = ["Open:Heartbeat", "Open:ClaimTask"]
+assert granted.posts[0].particle.grants[0].id = gid
+assert granted.posts[0].particle.grants[0].missing = ["cargo"]
+emit Workers to this get running
+assert running.count = 1
+assert running.request = "{\"argv\":[\"git\",\"status\",\"--short\"],\"cwd\":\"/srv/app/src\",\"timeout_seconds\":120,\"report_bytes\":4096}"
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = view } to this get busy
+assert busy.value.work.stage = "running"
+assert busy.value.work.approval_id = ""
+| It finishes; the worker's own result is reported once, through the device door.
+emit Alive { alive = false, code = 0 } to proc
+emit Respond { command = "cat", arg = "--", stdout = "{\"state\":\"completed\",\"exit_code\":0,\"stdout\":\" M a.txt\\n\",\"stderr\":\"\"}", code = 0 } to proc
+emit Reply { body = "{\"_class\":\"TaskCompleted\",\"id\":\"s-1\",\"replayed\":false}" } to http
+emit WorkerTick { id = "s-1" } to this
+emit Posts to this get finished
+assert finished.items[0]._class = "Open"
+assert finished.items[0].particle._class = "CompleteTerminalStep"
+assert finished.items[0].particle.exit_code = 0
+assert finished.items[0].particle.stdout = " M a.txt\n"
+emit Respond { command = "cat", arg = "--", stdout = "", code = 1 } to proc
+
+| ---- Whatever the gateway sends, this grant decides ----
+
+emit Respond { command = "realpath", arg = "/srv/app/link", stdout = "/etc\n", code = 0 } to proc
+emit Respond { command = "realpath", arg = "/srv/app-evil", stdout = "/srv/app-evil\n", code = 0 } to proc
+emit Deliver { kind = "TerminalStep", step = { id = "s-2", argv = ["rm", "-rf", "/"], cwd = "/srv/app", device_id = "srv-1", grant_id = gid, confirmed = true } } to this get unlisted
+assert unlisted.report.state = "rejected"
+emit Includes { text = unlisted.report.stderr, needle = "not granted" } to this get says_unlisted
+assert says_unlisted.yes
+emit Deliver { kind = "TerminalStep", step = { id = "s-3", argv = ["git", "push"], cwd = "/srv/app", device_id = "srv-1", grant_id = gid, confirmed = false } } to this get unasked
+emit Includes { text = unasked.report.stderr, needle = "yes in Mike" } to this get says_ask
+assert says_ask.yes
+emit Deliver { kind = "TerminalStep", step = { id = "s-4", argv = ["ls"], cwd = "/srv/app/link", device_id = "srv-1", grant_id = gid, confirmed = false } } to this get symlinked
+emit Includes { text = symlinked.report.stderr, needle = "resolves outside /srv/app" } to this get says_outside
+assert says_outside.yes
+emit Deliver { kind = "TerminalStep", step = { id = "s-5", argv = ["ls"], cwd = "/srv/app-evil", device_id = "srv-1", grant_id = gid, confirmed = false } } to this get sibling
+assert sibling.report.state = "rejected"
+emit Deliver { kind = "TerminalStep", step = { id = "s-6", argv = ["cargo", "test"], cwd = "/srv/app", device_id = "srv-1", grant_id = gid, confirmed = false } } to this get absent
+emit Includes { text = absent.report.stderr, needle = "not installed" } to this get says_absent
+assert says_absent.yes
+emit Deliver { kind = "TerminalStep", step = { id = "s-7", argv = ["ls"], cwd = "/srv/app", device_id = "srv-1", grant_id = "g-forged", confirmed = true } } to this get forged
+assert forged.report.state = "rejected"
+emit Deliver { kind = "InterfaceTask", step = { id = "f-1", goal = "open the invoice", device_id = "srv-1" } } to this get file_task
+emit Workers to this get still_one
+assert still_one.count = 1
+
+| A question answered yes in Mike (confirmed) runs.
+emit Alive { alive = true, code = null } to proc
+emit Deliver { kind = "TerminalStep", step = { id = "s-8", argv = ["git", "push", "origin"], cwd = "/srv/app", device_id = "srv-1", grant_id = gid, confirmed = true } } to this get pushed
+emit Workers to this get two
+assert two.count = 2
+
+| ---- The owner revokes the grant in Mike while a command runs ----
+
+emit Reply { body = "{\"_class\":\"DeviceOnline\",\"device_id\":\"srv-1\",\"at\":9,\"revoked_grants\":[\"" + gid + "\"]}" } to http
+emit ServiceTick to this
+emit Posts to this get revoke_tick
+emit Ran to proc get signals
+termed = false
+loop one over signals.items
+    if one.command = "kill" and one.args[0] = "-TERM", termed = true
+assert termed
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = view } to this get after_revoke
+assert after_revoke.value.grants = []
+emit Alive { alive = false, code = null } to proc
+emit Respond { command = "cat", arg = "--", stdout = "{\"state\":\"cancelled\"}", code = 0 } to proc
+emit Reply { body = "{\"_class\":\"TaskCompleted\",\"id\":\"s-8\",\"replayed\":false}" } to http
+emit WorkerTick { id = "s-8" } to this
+emit Posts to this get stopped
+assert stopped.items[0].particle.state = "cancelled"
+emit Respond { command = "cat", arg = "--", stdout = "", code = 1 } to proc
+| The next heartbeat no longer lists it; a step under it is refused here.
+emit Deliver { kind = "TerminalStep", step = { id = "s-9", argv = ["ls"], cwd = "/srv/app", device_id = "srv-1", grant_id = gid, confirmed = false } } to this get lapsed
+assert lapsed.posts[0].particle.grants = []
+assert lapsed.report.state = "rejected"
+
+| ---- A step delivered twice is not repeated ----
+
+emit Call { method = "POST", path = "/v1/grants/add", body = "{\"root\":\"/srv/app\",\"run\":[\"ls\"]}", bearer = ctl } to this get regranted
+emit Deliver { kind = "TerminalStep", step = { id = "s-1", argv = ["ls"], cwd = "/srv/app", device_id = "srv-1", grant_id = regranted.value.grant.id, confirmed = false } } to this get duplicate
+assert duplicate.report.state = "rejected"
+emit Includes { text = duplicate.report.stderr, needle = "delivered again" } to this get says_duplicate
+assert says_duplicate.yes
+emit Workers to this get no_repeat
+assert no_repeat.count = 2
+
+| Stopped so early the worker leaves no result: a stop, not a failure.
+emit Alive { alive = true, code = null } to proc
+emit Deliver { kind = "TerminalStep", step = { id = "s-12", argv = ["ls"], cwd = "/srv/app", device_id = "srv-1", grant_id = regranted.value.grant.id, confirmed = false } } to this get early
+emit Call { method = "POST", path = "/v1/work/stop", body = "{\"work_id\":\"s-12\"}", bearer = ctl } to this get early_stop
+assert early_stop.status = 200
+emit Alive { alive = false, code = null } to proc
+emit Reply { body = "{\"_class\":\"TaskCompleted\",\"id\":\"s-12\",\"replayed\":false}" } to http
+emit WorkerTick { id = "s-12" } to this
+emit Posts to this get early_report
+assert early_report.items[0].particle.state = "cancelled"
+
+| Local revocation of a grant.
+emit Call { method = "POST", path = "/v1/grants/revoke", body = "{\"grant_id\":\"" + regranted.value.grant.id + "\"}", bearer = ctl } to this get local_revoke
+assert local_revoke.status = 200
+emit Call { method = "POST", path = "/v1/grants/revoke", body = "{\"grant_id\":\"" + regranted.value.grant.id + "\"}", bearer = ctl } to this get revoke_again
+assert revoke_again.status = 404
+
+| ---- Unenrolling ends the device at the gateway with its own credential ----
+
+emit Reply { body = "{\"_class\":\"DeviceRevoked\",\"device_id\":\"srv-1\",\"replayed\":false}" } to http
+emit Call { method = "POST", path = "/v1/device/revoke", body = "{}", bearer = ctl } to this get unenrolled
+assert unenrolled.status = 200
+assert unenrolled.value.confirmed_by_gateway
+emit Posts to this get revoke_posts
+emit Classes { posts = revoke_posts.items } to this get revoke_classes
+assert revoke_classes.items = ["Open:RevokeSelf"]
+emit Call { method = "POST", path = "/v1/attach", body = "{\"client\":\"viewer\",\"approvals\":false}", bearer = key } to this get after_unenroll
+assert not after_unenroll.value.state.paired
+assert not after_unenroll.value.state.headless
+emit Deliver { kind = "TerminalStep", step = { id = "s-10", argv = ["ls"], cwd = "/srv/app", device_id = "srv-1" } } to this get after_device
+assert after_device.posts = []
+
+| ---- A restart reloads the headless identity, its grants and seen steps ----
+
+emit Get { name = "HOME" } to system_env get home
+state = home.value + "/.local/state/mike-service"
+emit Get { name = "MIKE_SERVICE_STATE_DIR", default = "" } to system_env get chosen
+if chosen.value ≠ "", state = chosen.value
+future = 4102444800
+emit Stringify { value = [{ id = "g-saved", owner = "ada@example.test", device_id = "srv-1", root = "/srv/app", run = [["ls"]], ask = [], created_at = 1, expires_at = future, timeout_seconds = 60, missing = [] }] } to json get saved_grants
+emit Respond { command = "cat", arg = state + "/mode", stdout = "headless", code = 0 } to proc
+emit Respond { command = "cat", arg = state + "/owner", stdout = "ada@example.test", code = 0 } to proc
+emit Respond { command = "cat", arg = state + "/device_id", stdout = "srv-1", code = 0 } to proc
+emit Respond { command = "cat", arg = state + "/credential", stdout = secret, code = 0 } to proc
+emit Respond { command = "cat", arg = state + "/grants", stdout = saved_grants.value, code = 0 } to proc
+emit Respond { command = "cat", arg = state + "/seen", stdout = "[\"s-1\",\"s-11\"]", code = 0 } to proc
+emit LoadHeadless to this get reloaded
+assert reloaded ∈ HeadlessLoaded
+emit Deliver { kind = "TerminalStep", step = { id = "s-11", argv = ["ls"], cwd = "/srv/app", device_id = "srv-1", grant_id = "g-saved", confirmed = false } } to this get seen_before_restart
+assert seen_before_restart.posts[0].particle.grants[0].id = "g-saved"
+emit Includes { text = seen_before_restart.report.stderr, needle = "delivered again" } to this get not_repeated
+assert not_repeated.yes

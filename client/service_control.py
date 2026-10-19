@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Lifecycle commands for the shared Mike service: mike-service <command>.
+"""Lifecycle and headless commands for the shared Mike service: mike-service <command>.
 
 `run` is handled by the shell launcher (it is what the systemd user unit
 starts). These commands manage that unit, or a detached instance when no
@@ -103,8 +103,9 @@ def status() -> int:
             state = client.attach()
             work = state.get("work") or {}
             print("account:", state.get("account") or "(signed out)", " connection:", state.get("connection"),
-                  " paired:", state.get("paired"), " clients:", state.get("clients"),
-                  " approval clients:", state.get("approval_clients"))
+                  " paired:", state.get("paired"), " headless:", state.get("headless"),
+                  " clients:", state.get("clients"), " approval clients:", state.get("approval_clients"))
+            print("grants:", len(state.get("grants") or []), "(mike-service grant list)")
             if work:
                 print("work:", work.get("kind"), work.get("stage"), "claim:", work.get("claim"))
         except (mike_service.ServiceError, mike_service.ServiceUnavailable) as error:
@@ -196,6 +197,143 @@ def uninstall_unit() -> int:
     return 0
 
 
+def control_client() -> mike_service.MikeService:
+    """The OS user at this terminal, attached with control capability."""
+    if not mike_service.reachable():
+        raise SystemExit("mike-service: not running (mike-service start)")
+    client = mike_service.MikeService("mike-service control", approvals=True)
+    client.attach()
+    return client
+
+
+def enroll(args: list[str]) -> int:
+    """Pair a server without a browser: print a short code, wait for the
+    person (signed in elsewhere as --account) to enter it in Mike."""
+    account, name, wait = None, None, 600
+    rest = list(args)
+    while rest:
+        option = rest.pop(0)
+        if option == "--account" and rest:
+            account = rest.pop(0)
+        elif option == "--name" and rest:
+            name = rest.pop(0)
+        elif option == "--no-wait":
+            wait = 0
+        else:
+            raise SystemExit("usage: mike-service enroll --account EMAIL [--name NAME] [--no-wait]")
+    if not account:
+        raise SystemExit("mike-service enroll: --account names the account that will confirm the code")
+    client = control_client()
+    try:
+        started = client.call("/v1/enroll/start", {"account": account, **({"name": name} if name else {})})
+        minutes = int(started.get("expires_in", 600)) // 60
+        print(f"Enrolling this computer as \"{started['name']}\" for {started['account']}.")
+        print(f"In Mike (signed in as {started['account']}), open Your devices -> Connect a server and enter:")
+        print()
+        print("    " + started["user_code"])
+        print()
+        print(f"The code expires in {minutes} minutes. A code confirmed by any other account is revoked at once.")
+        print("Enrolling grants nothing: add a grant (mike-service grant add) before Mike can run anything here.")
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            time.sleep(2)
+            enrollment = client.state().get("enrollment") or {}
+            if enrollment.get("state") != "pending":
+                print("mike-service:", enrollment.get("detail") or enrollment.get("state"))
+                return 0 if enrollment.get("state") == "confirmed" else 1
+        if wait:
+            print("mike-service: still waiting; check `mike-service status`")
+        return 0
+    except mike_service.ServiceError as error:
+        print("mike-service enroll:", error.body.get("message", error), file=sys.stderr)
+        return 1
+    finally:
+        client.detach()
+
+
+GRANT_USAGE = """usage:
+  mike-service grant add --root DIR [--run 'CMD WORDS']... [--ask 'CMD WORDS']...
+                         [--minutes N | --hours N] [--timeout SECONDS]
+  mike-service grant list
+  mike-service grant revoke GRANT_ID"""
+
+
+def describe(grant: dict) -> str:
+    runs = ", ".join(" ".join(words) for words in grant.get("run", [])) or "-"
+    asks = ", ".join(" ".join(words) for words in grant.get("ask", [])) or "-"
+    left = max(0, int(grant.get("seconds_left", 0)))
+    text = f"{grant['id']}  {grant['root']}\n    runs: {runs}\n    asks first in Mike: {asks}\n" \
+           f"    expires in {left // 3600} h {left % 3600 // 60} min, at most {grant.get('timeout_seconds')} s per command"
+    if grant.get("missing"):
+        text += "\n    not installed here: " + ", ".join(grant["missing"])
+    return text
+
+
+def grant(args: list[str]) -> int:
+    if not args:
+        raise SystemExit(GRANT_USAGE)
+    action, rest = args[0], list(args[1:])
+    client = control_client()
+    try:
+        if action == "list":
+            grants = client.state().get("grants") or []
+            for one in grants:
+                print(describe(one))
+            if not grants:
+                print("No grants: Mike can run nothing on this computer without a local approval.")
+            return 0
+        if action == "revoke" and len(rest) == 1:
+            client.call("/v1/grants/revoke", {"grant_id": rest[0]})
+            print("mike-service: grant", rest[0], "revoked; a command running under it was stopped")
+            return 0
+        if action != "add":
+            raise SystemExit(GRANT_USAGE)
+        request: dict = {"run": [], "ask": []}
+        while rest:
+            option = rest.pop(0)
+            if option in ("--root", "--run", "--ask", "--minutes", "--hours", "--timeout") and rest:
+                value = rest.pop(0)
+                if option == "--root":
+                    request["root"] = os.path.abspath(value)
+                elif option in ("--run", "--ask"):
+                    request[option[2:]].append(value)
+                elif option == "--minutes":
+                    request["minutes"] = int(value)
+                elif option == "--hours":
+                    request["minutes"] = int(value) * 60
+                else:
+                    request["timeout_seconds"] = int(value)
+            else:
+                raise SystemExit(GRANT_USAGE)
+        if "root" not in request:
+            raise SystemExit(GRANT_USAGE)
+        added = client.call("/v1/grants/add", request)["grant"]
+        print("mike-service: granted")
+        print(describe({**added, "seconds_left": added["expires_at"] - added["created_at"]}))
+        print("Granted commands run unattended as this OS user, with all of its rights. The directory is where")
+        print("they start, not a sandbox: a granted program can read or change anything this user can.")
+        return 0
+    except mike_service.ServiceError as error:
+        print("mike-service grant:", error.body.get("message", error), file=sys.stderr)
+        return 1
+    finally:
+        client.detach()
+
+
+def unenroll() -> int:
+    client = control_client()
+    try:
+        answer = client.call("/v1/device/revoke", {})
+        print("mike-service: this computer's pairing was revoked"
+              + ("" if answer.get("confirmed_by_gateway") else " here; the gateway could not be reached, revoke it in Mike too"))
+        return 0
+    except mike_service.ServiceError as error:
+        print("mike-service unenroll:", error.body.get("message", error), file=sys.stderr)
+        return 1
+    finally:
+        client.detach()
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         raise SystemExit("usage: service_control.py <bundle> <command>")
@@ -213,6 +351,12 @@ def main(argv: list[str]) -> int:
         return install_unit(bundle, rest)
     if command == "uninstall-unit":
         return uninstall_unit()
+    if command == "enroll":
+        return enroll(rest)
+    if command == "grant":
+        return grant(rest)
+    if command == "unenroll":
+        return unenroll()
     print("mike-service: unknown command", command, file=sys.stderr)
     return 2
 

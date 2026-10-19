@@ -19,7 +19,8 @@ import time
 
 
 MAX_OUTPUT = 32 * 1024
-MAX_SECONDS = 60
+# A grant may allow up to 180 s; without one the service asks for 60 s.
+MAX_SECONDS = 180
 MAX_ARGV = 64
 MAX_TEXT = 4096
 PR_SET_NO_NEW_PRIVS = 38
@@ -80,7 +81,7 @@ def validate(request: object) -> tuple[list[str], str, int]:
     if not isinstance(cwd, str) or not cwd.startswith("/") or len(cwd) > MAX_TEXT or "\x00" in cwd:
         raise ValueError("cwd must be an absolute directory")
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= MAX_SECONDS:
-        raise ValueError("timeout_seconds must be between 1 and 60")
+        raise ValueError("timeout_seconds must be between 1 and 180")
     return argv, cwd, timeout
 
 
