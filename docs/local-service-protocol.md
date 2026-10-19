@@ -246,7 +246,9 @@ there is no filesystem, network or process isolation beyond the OS user.
 (`awaiting_input`, 30 minutes) with a one-time version. Mike's turn shows it
 as an ordinary confirmation in the conversation and pushes "Mike needs your
 answer" (device name only; no command) to the person's own ntfy topic, set
-in Mike's device panel, once per question; the push only opens Mike. Only
+in Mike's device panel, once per question; the push opens its exact turn in Mike (`/mike/turn/<id>`),
+including when a newer turn exists. A stale or foreign link cannot select
+another approval. Opening the link never approves anything. Only
 that person's Yes/No in that turn answers it; the gateway re-checks owner,
 version, expiry, device and grant, and only the first answer counts. A yes
 starts the step's normal 300 s dispatch window. Mike advances a turn waiting
