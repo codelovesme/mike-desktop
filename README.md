@@ -202,3 +202,11 @@ microphone request becomes a native permission dialog.
 
 Linux x86_64 is the only packaged desktop platform today. Mobile apps are
 future work.
+
+## Terminal client
+
+`bin/mike-cli` (or the independent `mike-cli` package) uses the same local
+service as Desktop. See [docs/cli.md](docs/cli.md) for sign-in, project context,
+resuming a central turn, explicit decisions, non-TTY and stop/detach behavior.
+`mike` and `mike-desktop` keep their existing Desktop launch behavior.
+Stage without publishing: `python3 tools/package.py --cli-only v0.5.0 /tmp/mike-packages`.

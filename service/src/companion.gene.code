@@ -1010,6 +1010,9 @@ Route { method, path, body, headers } =>
     if path = "/v1/chat/ask"
         emit ChatAsk { session = session, request = request } to this get asked
         return asked
+    if path = "/v1/chat/resume"
+        emit ChatResume { session = session, request = request } to this get resumed
+        return resumed
     if path = "/v1/chat/progress"
         emit ChatProgress { session = session, request = request } to this get progress
         return progress
@@ -1163,6 +1166,8 @@ StateFor { session } =>
         session = session.id
         approvals = session.approvals
         account = account_email
+        device_id = device_id
+        chat_version = 1
         connection = connection
         paired = credential ≠ ""
         capabilities = offered.items
@@ -1314,8 +1319,8 @@ RevokeThisDevice =>
 | ---- Intentional chat input for clients without the web conversation ----
 |
 | A thin pass-through to central Mike with the account's session: Mike keeps
-| the conversation and memory. A turn is visible only to the session that
-| started it.
+| the conversation and memory. A turn is visible to a session that started
+| it or explicitly resumed it after central ownership verification.
 ForgetTurns =>
     turns = []
     return Forgotten
@@ -1327,12 +1332,26 @@ ChatAsk { session, request } =>
     if request.text ∉ String or request.text = ""
         emit Fail { status = 400, error = "bad_request", message = "text is required" } to this get empty
         return empty
-    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text, device_id = device_id } } } to this get started
+    workspace = ""
+    if request.workspace ∈ String
+        emit Length { value = request.workspace } to core get size
+        if size.value > 4096
+            emit Fail { status = 400, error = "bad_request", message = "workspace is too long" } to this get long
+            return long
+        workspace = request.workspace
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text, device_id = device_id, workspace = workspace } } } to this get started
     if started ∉ Thinking
         emit Fail { status = 503, error = "mike_unavailable", message = "Mike did not start the turn" } to this get unavailable
         return unavailable
-    turns += [{ turn_id = started.turn_id, session = session.id }]
+    emit RememberChat { turn_id = started.turn_id, session = session.id } to this
     return Answer { status = 200, value = { turn_id = started.turn_id } }
+
+| Session bindings are a bounded working set, not another chat database.
+RememberChat { turn_id, session } =>
+    turns += [{ turn_id = turn_id, session = session }]
+    emit Length { value = turns } to core get count
+    if count.value > 128, turns = turns[count.value - 128, length)
+    return Remembered
 
 OwnTurn { session, turn_id } =>
     loop one over turns
@@ -1340,31 +1359,85 @@ OwnTurn { session, turn_id } =>
             return TurnOwned
     return NotOwned
 
+| Explicit resumption verifies central ownership before binding an existing
+| turn to this session. It never asks again or replays an action/approval.
+ChatResume { session, request } =>
+    if account_token = "" or request.turn_id ∉ String or request.turn_id = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account and name a turn" } to this get denied
+        return denied
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Progress { turn_id = request.turn_id } } } to this get turn
+    if turn ∉ Turn or turn.turn_id ≠ request.turn_id
+        emit Fail { status = 404, error = "unknown_turn", message = "that turn is unavailable for this account" } to this get missing
+        return missing
+    emit OwnTurn { session = session, turn_id = request.turn_id } to this get owned
+    if owned ∉ TurnOwned, emit RememberChat { turn_id = request.turn_id, session = session.id } to this
+    emit ChatView { session = session, turn = turn, id = request.turn_id } to this get view
+    return view
+
 ChatProgress { session, request } =>
     emit OwnTurn { session = session, turn_id = request.turn_id } to this get owned
     if owned ∉ TurnOwned
-        emit Fail { status = 404, error = "unknown_turn", message = "this session did not start that turn" } to this get unknown
+        emit Fail { status = 404, error = "unknown_turn", message = "this session did not start or resume that turn" } to this get unknown
         return unknown
     emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Progress { turn_id = request.turn_id } } } to this get turn
     if turn ∉ Turn
         emit Fail { status = 503, error = "mike_unavailable", message = "Mike's progress is unavailable" } to this get unavailable
         return unavailable
+    emit ChatView { session = session, turn = turn, id = request.turn_id } to this get view
+    return view
+
+ChatView { session, turn, id } =>
+    previous = null
+    nonce = ""
+    loop one over turns
+        if one.turn_id = id and one.session = session.id
+            previous = one.pending
+            if one.nonce ∈ String, nonce = one.nonce
+    if turn.stage ≠ "confirm"
+        nonce = ""
+    if turn.stage = "confirm" and (previous ≠ turn.pending or nonce = "")
+        emit RandomToken to this get minted
+        if minted ∉ Token
+            emit Fail { status = 503, error = "no_random_source", message = "could not identify the question" } to this get failed
+            return failed
+        nonce = minted.value
+    kept = []
+    loop one over turns
+        if one.turn_id = id and one.session = session.id
+            one = one + { pending = turn.pending, nonce = nonce }
+        kept += [one]
+    turns = kept
     say = ""
     if turn.pending ∈ Object and turn.pending.say ∈ String, say = turn.pending.say
     reply = ""
     if turn.reply ∈ String, reply = turn.reply
-    return Answer { status = 200, value = { turn_id = request.turn_id, stage = turn.stage, reply = reply, say = say } }
+    work_id = ""
+    if turn.waiting ∈ Object and turn.waiting.app = "mike-interface" and turn.waiting.id ∈ String
+        work_id = turn.waiting.id
+    steps = []
+    if turn.steps ∈ Array, steps = turn.steps
+    return Answer { status = 200, value = { turn_id = id, stage = turn.stage, reply = reply, say = say, confirmation_id = nonce, steps = steps, work_id = work_id } }
 
 ChatConfirm { session, request } =>
     emit OwnTurn { session = session, turn_id = request.turn_id } to this get owned
-    if owned ∉ TurnOwned or request.yes ∉ Boolean
-        emit Fail { status = 404, error = "unknown_turn", message = "this session did not start that turn" } to this get unknown
+    pending = null
+    loop one over turns
+        if one.turn_id = request.turn_id and one.session = session.id and one.nonce ∈ String and one.nonce ≠ "" and one.nonce = request.confirmation_id
+            pending = one.pending
+    if owned ∉ TurnOwned or request.yes ∉ Boolean or pending = null
+        emit Fail { status = 409, error = "stale_question", message = "read the current question before answering" } to this get unknown
         return unknown
-    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Confirm { turn_id = request.turn_id, yes = request.yes } } } to this get sent
-    if sent ∈ ApiUnavailable
-        emit Fail { status = 503, error = "mike_unavailable", message = "the decision did not reach Mike" } to this get unavailable
+    | Consume before sending: a lost reply never becomes a duplicate yes.
+    kept = []
+    loop one over turns
+        if one.turn_id = request.turn_id and one.session = session.id, one = one + { nonce = "", pending = null }
+        kept += [one]
+    turns = kept
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Confirm { turn_id = request.turn_id, yes = request.yes, expected_pending = pending } } } to this get sent
+    if sent ∉ Confirmed
+        emit Fail { status = 409, error = "decision_unconfirmed", message = "the decision was not confirmed; inspect progress instead of retrying it" } to this get unavailable
         return unavailable
-    return Answer { status = 200, value = { sent = true } }
+    return Answer { status = 200, value = { sent = sent.sent = true } }
 
 | ======== Headless servers: enrollment and grants (ticket 160) ========
 |

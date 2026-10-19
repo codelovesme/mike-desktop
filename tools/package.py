@@ -3,6 +3,7 @@
 
   tools/package.py <version> <out-dir>              Desktop bundle (interim)
   tools/package.py --service-only <version> <out>   the shared service alone
+  tools/package.py --cli-only <version> <out>       terminal client alone
 
 The service package (docs/service-package.md) is independently installable:
 its launcher, lifecycle control, local-protocol client, Euglena application
@@ -105,6 +106,9 @@ def fresh(out: Path, name: str) -> Path:
 
 def main():
     args = sys.argv[1:]
+    cli_only = args[:1] == ["--cli-only"]
+    if cli_only:
+        args = args[1:]
     service_only = args[:1] == ["--service-only"]
     if service_only:
         args = args[1:]
@@ -112,6 +116,18 @@ def main():
         raise SystemExit(__doc__)
     version, destination = args
     out = Path(destination).resolve()
+    if cli_only:
+        stage = fresh(out, f"mike-cli-{version}-x86_64-linux")
+        (stage / "client").mkdir()
+        for name in ("mike_service.py", "cli.py"):
+            shutil.copy2(ROOT / "client" / name, stage / "client" / name)
+        shutil.copy2(ROOT / "bin/mike-cli", stage / "mike-cli")
+        shutil.copy2(ROOT / "docs/cli.md", stage / "README.md")
+        (stage / "VERSION").write_text(version + "\n")
+        (stage / "cdlvsm-package.info").write_text(
+            "format=1\n" + f"requires=mike-service {series(version)}\n" + "system=python3\n")
+        print(archive(out, stage))
+        return
     if service_only:
         stage = fresh(out, f"mike-service-{version}-x86_64-linux")
         stage_service(stage, version)

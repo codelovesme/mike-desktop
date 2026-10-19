@@ -94,9 +94,10 @@ The account token and the device credential are never returned to a client.
 | `POST /v1/work/stop` | `work_id` | `{stopping:true}` |
 | `POST /v1/signout` | `{}` | `{signed_out:true}` |
 | `POST /v1/device/revoke` | `{}` | `{revoked, confirmed_by_gateway}` |
-| `POST /v1/chat/ask` | `text` | `{turn_id}` |
-| `POST /v1/chat/progress` | `turn_id` | `{stage, reply, say}` |
-| `POST /v1/chat/confirm` | `turn_id`, `yes` | `{sent:true}` |
+| `POST /v1/chat/ask` | `text`, optional `workspace` (context only) | `{turn_id}` |
+| `POST /v1/chat/progress` | `turn_id` | `{turn_id, stage, reply, say, steps, work_id, confirmation_id}` |
+| `POST /v1/chat/resume` | `turn_id` | same as progress, after central ownership check |
+| `POST /v1/chat/confirm` | `turn_id`, `yes`, `confirmation_id` | `{sent:bool}` |
 | `POST /v1/enroll/start` (control) | `account`, `name`? | `{user_code, expires_in, name, account}` |
 | `POST /v1/grants/add` (control) | `root`, `run`, `ask`, `minutes`?, `timeout_seconds`? | `{grant}` |
 | `POST /v1/grants/revoke` (control) | `grant_id` | `{revoked:true}` |
@@ -138,7 +139,13 @@ activity: [{ at, kind (requested | running | found | result | note), id,
 `approval_id` is shown only to sessions attached with `approvals: true`,
 and only while the work awaits a decision. `/chat/*` are a thin pass-through
 to central Mike with the account's session, for clients that do not embed the
-web conversation; a turn is visible only to the session that started it.
+web conversation; a turn is visible only to the session that started it or explicitly resumed it
+through central owner verification. State advertises `chat_version=1` and
+`device_id` for these additive routes. `confirmation_id` is per session and
+question, consumed before forwarding; the central handler atomically compares
+`expected_pending` with its current question. A stale or duplicate answer is
+rejected, and an uncertain send is never retried automatically. A client needs
+the account chat token in the service even if the machine is headless-enrolled.
 
 ## Work and approvals
 

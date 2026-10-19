@@ -342,6 +342,31 @@ emit Reply { body = "{\"_class\":\"Turn\",\"stage\":\"done\",\"reply\":\"Hi\",\"
 emit Call { method = "POST", path = "/v1/chat/progress", body = "{\"turn_id\":\"turn-1\"}", bearer = asker_token, extra = {} } to this get progress
 assert progress.value.reply = "Hi"
 
+| CLI resumption is explicit and central-owner checked, never a new Ask.
+emit Reply { body = "{\"_class\":\"Turn\",\"turn_id\":\"turn-1\",\"stage\":\"confirm\",\"pending\":{\"say\":\"first question\",\"fields\":{\"version\":\"v1\"}}}" } to http
+emit Call { method = "POST", path = "/v1/chat/resume", body = "{\"turn_id\":\"turn-1\"}", bearer = watch, extra = {} } to this get resumed
+assert resumed.status = 200
+nonce = resumed.value.confirmation_id
+assert nonce ≠ ""
+emit LastPost to this get resume_post
+assert resume_post.value.particle._class = "Progress"
+emit Call { method = "POST", path = "/v1/chat/confirm", body = "{\"turn_id\":\"turn-1\",\"yes\":true,\"confirmation_id\":\"stale\"}", bearer = watch, extra = {} } to this get stale_cli_question
+assert stale_cli_question.status = 409
+emit Reply { body = "{\"_class\":\"Confirmed\",\"sent\":true}" } to http
+emit Call { method = "POST", path = "/v1/chat/confirm", body = "{\"turn_id\":\"turn-1\",\"yes\":true,\"confirmation_id\":\"$nonce\"}", bearer = watch, extra = {} } to this get confirmed
+assert confirmed.value.sent
+emit LastPost to this get confirm_post
+assert confirm_post.value.particle.expected_pending.fields.version = "v1"
+emit Call { method = "POST", path = "/v1/chat/confirm", body = "{\"turn_id\":\"turn-1\",\"yes\":true,\"confirmation_id\":\"$nonce\"}", bearer = watch, extra = {} } to this get duplicate_yes
+assert duplicate_yes.status = 409
+emit Reply { body = "{\"_class\":\"Unknown\",\"turn_id\":\"another-owner\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/resume", body = "{\"turn_id\":\"another-owner\"}", bearer = watch, extra = {} } to this get foreign_resume
+assert foreign_resume.status = 404
+emit Reply { body = "{\"_class\":\"Thinking\",\"turn_id\":\"project-turn\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/ask", body = "{\"text\":\"check the project\",\"workspace\":\"/srv/project\"}", bearer = asker_token, extra = {} } to this get project_ask
+emit LastPost to this get project_post
+assert project_post.value.particle.workspace = "/srv/project"
+
 | ---- Account change: the old owner's running command is stopped and
 | reported with the old owner's credentials; every session must re-attach ----
 

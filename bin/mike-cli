@@ -1,0 +1,9 @@
+#!/bin/sh
+# Terminal client only; mike and mike-desktop retain their Desktop meaning.
+set -eu
+launcher_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+here=$launcher_dir
+if [ ! -f "$here/client/cli.py" ]; then
+    here=$(CDPATH= cd -- "$launcher_dir/.." && pwd)
+fi
+exec /usr/bin/python3 "$here/client/cli.py" "$@"
