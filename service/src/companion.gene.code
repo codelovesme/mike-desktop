@@ -18,6 +18,7 @@ state_dir = ""
 runtime_dir = ""
 adapters_dir = ""
 own_pid = ""
+user_id = ""
 client_key = ""
 listen_port = 0
 running = false
@@ -101,10 +102,10 @@ Configure =>
     if chosen_runtime.value ≠ "", runtime_dir = chosen_runtime.value
     emit PrivateDirectory { path = state_dir } to this get state_private
     if state_private ∉ PrivateReady
-        return NotConfigured { reason = "the state directory is not private to this user: " + state_dir }
+        return NotConfigured { reason = "the state directory " + state_private.reason + ": " + state_dir }
     emit PrivateDirectory { path = runtime_dir } to this get runtime_private
     if runtime_private ∉ PrivateReady
-        return NotConfigured { reason = "the runtime directory is not private to this user: " + runtime_dir }
+        return NotConfigured { reason = "the runtime directory " + runtime_private.reason + ": " + runtime_dir }
     emit Run { command = "pwd" } to proc get here
     if here ∈ Exception or not here.success
         return NotConfigured { reason = "the working directory is unknown" }
@@ -120,24 +121,31 @@ Configure =>
     return Configured
 
 | A directory holding a credential: absolute, a real directory (not a
-| symlink), owned by this user, mode 0700. Another OS user's directory, or a
-| shared one, is refused rather than repaired.
+| symlink), owned by this user, mode 0700. An existing path is inspected
+| before anything touches it and is never repaired: a symlink, another
+| user's directory or a group/world-accessible one is refused unchanged. A
+| missing one is created 0700 (parents with the umask) and checked again,
+| which also catches a symlink planted between the two looks.
 PrivateDirectory { path } =>
     if path ∉ String or path = "" or path[0, 1) ≠ "/"
-        return NotPrivate
+        return NotPrivate { reason = "not an absolute path" }
+    emit Run { command = "id", args = ["-u"] } to proc get uid
+    if uid ∈ Exception or not uid.success
+        return NotPrivate { reason = "unknown user" }
+    emit Trim { value = uid.stdout } to strs get me
+    user_id = me.value
+    expected = "directory:" + me.value + ":700\n"
+    emit Run { command = "stat", args = ["-c", "%F:%u:%a", "--", path] } to proc get before
+    if before ∉ Exception and before.success
+        if before.stdout ≠ expected
+            return NotPrivate { reason = "exists but is not a private directory of this user" }
+        return PrivateReady
     emit Run { command = "mkdir", args = ["-p", "-m", "700", "--", path] } to proc get made
     if made ∈ Exception or not made.success
-        return NotPrivate
-    emit Run { command = "chmod", args = ["700", "--", path] } to proc get closed
-    if closed ∈ Exception or not closed.success
-        return NotPrivate
-    emit Run { command = "id", args = ["-u"] } to proc get uid
-    emit Run { command = "stat", args = ["-c", "%F:%u:%a", "--", path] } to proc get seen
-    if uid ∈ Exception or seen ∈ Exception or not uid.success or not seen.success
-        return NotPrivate
-    emit Trim { value = uid.stdout } to strs get me
-    if seen.stdout ≠ "directory:" + me.value + ":700\n"
-        return NotPrivate
+        return NotPrivate { reason = "could not be created" }
+    emit Run { command = "stat", args = ["-c", "%F:%u:%a", "--", path] } to proc get after
+    if after ∈ Exception or not after.success or after.stdout ≠ expected
+        return NotPrivate { reason = "is not a private directory of this user" }
     return PrivateReady
 
 | One service per OS user. `flock` holds the lock in a helper that exits

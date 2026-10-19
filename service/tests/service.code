@@ -72,6 +72,11 @@ emit Respond { command = "stat", arg = "", stdout = "directory:1000:750\n", code
 emit Configure to this get shared
 assert shared ∈ NotConfigured
 emit Respond { command = "stat", arg = "", stdout = "directory:1000:700\n", code = 0 } to proc
+emit Ran to proc get inspected
+modified = false
+loop one over inspected.items
+    if one.command = "chmod" or one.command = "mkdir", modified = true
+assert not modified
 emit AllowedHost { url = "http://127.0.0.1:8923" } to this get loopback
 assert loopback.ok
 emit AllowedHost { url = "http://127.0.0.1:8923/evil" } to this get pathed

@@ -126,9 +126,15 @@ def start(bundle: Path) -> int:
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline and not mike_service.reachable():
             time.sleep(0.2)
-    elif not mike_service.ensure_running(launcher(bundle), env=dict(os.environ)):
-        print("mike-service: did not start; see ~/.local/state/mike-service/service.log", file=sys.stderr)
-        return 1
+    else:
+        try:
+            started = mike_service.ensure_running(launcher(bundle), env=dict(os.environ))
+        except mike_service.ServiceUnavailable as error:
+            print("mike-service: not started:", error, file=sys.stderr)
+            return 1
+        if not started:
+            print("mike-service: did not start; see service.log in the state directory", file=sys.stderr)
+            return 1
     if not mike_service.reachable():
         print("mike-service: started but not answering", file=sys.stderr)
         return 1

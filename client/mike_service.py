@@ -187,6 +187,41 @@ def reachable(directory: Path | None = None) -> bool:
     return False
 
 
+def state_dir() -> Path:
+    return Path(os.environ.get("MIKE_SERVICE_STATE_DIR") or Path.home() / ".local/state/mike-service")
+
+
+def private_directory(path: Path) -> Path:
+    """The service's own rule, client side: an existing path must already be
+    this user's real 0700 directory and is never repaired; a missing one is
+    created 0700. Anything else raises ServiceUnavailable untouched."""
+    if not path.is_absolute():
+        raise ServiceUnavailable(f"{path} is not absolute")
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+    if not _private(path, True) or stat.S_IMODE(os.lstat(path).st_mode) != 0o700:
+        raise ServiceUnavailable(f"{path} is not a private directory of this user")
+    return path
+
+
+def open_private_log(directory: Path) -> int:
+    """service.log inside a verified private directory, opened without
+    following a symlink, and only if it is this user's regular file."""
+    descriptor = os.open(directory / "service.log",
+                         os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+        os.close(descriptor)
+        raise ServiceUnavailable("service.log is not a private regular file")
+    return descriptor
+
+
 def unit_installed() -> bool:
     if not shutil.which("systemctl"):
         return False
@@ -206,11 +241,16 @@ def ensure_running(launcher: Path, wait: float = 20, env: dict | None = None) ->
     if env is None and unit_installed():
         subprocess.run(["systemctl", "--user", "start", UNIT], capture_output=True, timeout=30)
     else:
-        log_dir = Path(os.environ.get("MIKE_SERVICE_STATE_DIR") or Path.home() / ".local/state/mike-service")
-        log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with open(log_dir / "service.log", "ab") as log:
+        directory = (env or os.environ).get("MIKE_SERVICE_STATE_DIR")
+        try:
+            log = open_private_log(private_directory(Path(directory) if directory else state_dir()))
+        except OSError as error:
+            raise ServiceUnavailable("cannot open the service log safely: " + str(error)) from error
+        try:
             subprocess.Popen([str(launcher), "run"], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                              start_new_session=True, env=env)
+        finally:
+            os.close(log)
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
         if reachable():

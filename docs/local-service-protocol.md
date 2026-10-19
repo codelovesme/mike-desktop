@@ -29,8 +29,12 @@ The runtime directory is `$MIKE_SERVICE_RUNTIME_DIR`, else
 `$XDG_RUNTIME_DIR/mike-service`, else `<state>/run`. State (the pairing and
 an in-flight marker) is in `$MIKE_SERVICE_STATE_DIR`, else
 `~/.local/state/mike-service`. Both must be real directories owned by this
-user with mode 0700; the service fixes the mode of its own directory and
-refuses a symlink, another user's directory or one it cannot make private.
+user with mode 0700. An existing path is inspected before anything touches
+it and is never repaired: a symlink, another user's directory or a
+group/world-accessible one is refused unchanged. A missing directory is
+created 0700. Clients apply the same rule to the state directory before
+opening `service.log` (never through a symlink) when they start a detached
+service.
 
 A client must check the files are private and owned by it, and that the
 listener on the published port belongs to its own uid (`/proc/net/tcp`)

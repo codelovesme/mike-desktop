@@ -190,18 +190,68 @@ class EndpointTrustTest(unittest.TestCase):
             with self.assertRaises(mike_service.ServiceUnavailable):
                 mike_service.read_endpoint(directory)
 
-    def test_symlinked_runtime_directory_is_refused_by_the_service(self):
+    def refused(self, area):
+        process = start(area, wait=False)
+        try:
+            output, _ = process.communicate(timeout=20)
+        finally:
+            stop(process)
+        self.assertNotEqual(process.returncode, 0)
+        return output
+
+    def test_symlinked_runtime_directory_is_refused_unchanged(self):
         with tempfile.TemporaryDirectory(prefix="mike-service-test-") as temporary:
             area = Path(temporary)
-            (area / "elsewhere").mkdir(mode=0o700)
-            (area / "run").symlink_to(area / "elsewhere")
-            process = start(area, wait=False)
-            try:
-                output, _ = process.communicate(timeout=20)
-            finally:
-                stop(process)
-            self.assertNotEqual(process.returncode, 0)
-            self.assertIn("not private", output)
+            target = area / "elsewhere"
+            target.mkdir(mode=0o755)
+            os.chmod(target, 0o755)
+            (target / "keep.txt").write_text("unchanged")
+            (area / "run").symlink_to(target)
+            output = self.refused(area)
+            self.assertIn("not a private directory", output)
+            self.assertEqual(os.stat(target).st_mode & 0o777, 0o755, "the symlink target's mode was changed")
+            self.assertEqual(sorted(p.name for p in target.iterdir()), ["keep.txt"])
+            self.assertEqual((target / "keep.txt").read_text(), "unchanged")
+
+    def test_existing_shared_directory_is_refused_not_repaired(self):
+        with tempfile.TemporaryDirectory(prefix="mike-service-test-") as temporary:
+            area = Path(temporary)
+            (area / "state").mkdir()
+            os.chmod(area / "state", 0o755)
+            output = self.refused(area)
+            self.assertIn("state directory exists but is not a private directory", output)
+            self.assertEqual(os.stat(area / "state").st_mode & 0o777, 0o755)
+            self.assertEqual(list((area / "state").iterdir()), [])
+
+
+class ClientLogTest(unittest.TestCase):
+    def test_log_directory_and_file_symlinks_are_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            area = Path(temporary)
+            target = area / "target"
+            target.mkdir(mode=0o755)
+            os.chmod(target, 0o755)
+            (area / "state").symlink_to(target)
+            with self.assertRaises(mike_service.ServiceUnavailable):
+                mike_service.ensure_running(area / "never-run", wait=0, env={"MIKE_SERVICE_STATE_DIR": str(area / "state")})
+            self.assertEqual(os.stat(target).st_mode & 0o777, 0o755)
+            self.assertEqual(list(target.iterdir()), [])
+            private = area / "private"
+            private.mkdir(mode=0o700)
+            victim = area / "victim.txt"
+            victim.write_text("original")
+            (private / "service.log").symlink_to(victim)
+            with self.assertRaises(OSError):
+                mike_service.open_private_log(mike_service.private_directory(private))
+            self.assertEqual(victim.read_text(), "original")
+
+    def test_missing_log_directory_is_created_private(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            made = mike_service.private_directory(Path(temporary) / "a" / "state")
+            self.assertEqual(os.stat(made).st_mode & 0o777, 0o700)
+            descriptor = mike_service.open_private_log(made)
+            os.close(descriptor)
+            self.assertEqual(os.stat(made / "service.log").st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":
