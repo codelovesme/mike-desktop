@@ -52,9 +52,26 @@ def _environment() -> dict[str, str]:
     return {key: os.environ[key] for key in kept if key in os.environ}
 
 
+REPORT_MARKER = "\n[output truncated]"
+
+
+def bounded_output(value: str, limit: int) -> str:
+    """At most `limit` UTF-8 bytes including the marker, cut on a character
+    boundary: the gateway contract Mike Desktop has always kept."""
+    raw = value.encode("utf-8")
+    if len(raw) <= limit:
+        return value
+    return raw[:limit - len(REPORT_MARKER.encode())].decode("utf-8", "ignore") + REPORT_MARKER
+
+
 def validate(request: object) -> tuple[list[str], str, int]:
-    if not isinstance(request, dict) or set(request) != {"argv", "cwd", "timeout_seconds"}:
+    required = {"argv", "cwd", "timeout_seconds"}
+    if not isinstance(request, dict) or not required <= set(request) <= required | {"report_bytes"}:
         raise ValueError("expected argv, cwd, and timeout_seconds")
+    if "report_bytes" in request:
+        limit = request["report_bytes"]
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 64 <= limit <= MAX_OUTPUT:
+            raise ValueError("report_bytes must be between 64 and 32768")
     argv, cwd, timeout = request["argv"], request["cwd"], request["timeout_seconds"]
     if not isinstance(argv, list) or not 1 <= len(argv) <= MAX_ARGV:
         raise ValueError("argv must contain 1 to 64 strings")
@@ -125,17 +142,30 @@ def run(request: object) -> dict:
     }
 
 
+def report(result: dict, limit: int) -> dict:
+    """The reportable form: a reason joins stderr, each stream is bounded."""
+    stderr = str(result.get("stderr", "")) + str(result.pop("reason", ""))
+    result["stdout"] = bounded_output(str(result.get("stdout", "")), limit)
+    result["stderr"] = bounded_output(stderr, limit)
+    return result
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, _stop_child)
+    request = None
     try:
         raw = sys.stdin.buffer.read(16 * 1024 + 1)
         if len(raw) > 16 * 1024:
             raise ValueError("request is too large")
-        result = run(json.loads(raw))
+        request = json.loads(raw)
+        result = run(request)
     except (ValueError, json.JSONDecodeError) as exc:
         result = {"state": "rejected", "reason": str(exc)}
     except KeyboardInterrupt:
         result = {"state": "cancelled"}
+    limit = request.get("report_bytes") if isinstance(request, dict) else None
+    if isinstance(limit, int) and not isinstance(limit, bool) and 64 <= limit <= MAX_OUTPUT:
+        result = report(result, limit)
     print(json.dumps(result, separators=(",", ":")))
 
 

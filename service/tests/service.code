@@ -184,7 +184,7 @@ loop one over prepared.items
     if one.command = "install" and one.stdin ∈ String and one.args[2] ∉ Null
         emit Includes { text = one.stdin, needle = "timeout_seconds" } to this get has_timeout
         if has_timeout.yes, request_text = one.stdin
-assert request_text = "{\"argv\":[\"pwd\"],\"cwd\":\"/tmp\",\"timeout_seconds\":60}"
+assert request_text = "{\"argv\":[\"pwd\"],\"cwd\":\"/tmp\",\"timeout_seconds\":60,\"report_bytes\":4096}"
 emit Call { method = "POST", path = "/v1/approvals/answer", body = "{\"approval_id\":\"$approval\",\"decision\":\"approve\"}", bearer = ada, extra = {} } to this get again
 assert again.status = 409
 assert again.value.error = "already_decided"
@@ -221,17 +221,29 @@ emit Length { value = after_stop.value.activity } to core get entries
 assert after_stop.value.activity[entries.value - 1].kind = "result"
 assert after_stop.value.activity[entries.value - 1].state = "cancelled"
 
-| Output is bounded before it leaves the machine.
-emit Bound { text = "x" } to this get small
-assert small.text = "x"
-long = ""
+| The worker bounds output (UTF-8 bytes, adapters/terminal_worker.py); the
+| service reports what it observed without cutting it again.
+emit Alive { alive = true, code = null } to proc
+emit Reply { body = "{\"_class\":\"DeviceOnline\",\"device_id\":\"dev-1\",\"at\":2}" } to http
+emit Reply { body = "{\"_class\":\"TerminalStep\",\"id\":\"step-wide\",\"argv\":[\"cat\",\"wide.txt\"],\"cwd\":\"/tmp\",\"device_id\":\"dev-1\"}" } to http
+emit ServiceTick to this
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = ada, extra = {} } to this get wide_task
+wide_approval = wide_task.value.work.approval_id
+emit Call { method = "POST", path = "/v1/approvals/answer", body = "{\"approval_id\":\"$wide_approval\",\"decision\":\"approve\"}", bearer = ada, extra = {} } to this get wide_started
+assert wide_started.value.stage = "running"
+wide = ""
 loop
-    emit Length { value = long } to core get grown
-    if grown.value ≥ 5000, break
-    long += "0123456789"
-emit Bound { text = long } to this get bounded
-emit Length { value = bounded.text } to core get bounded_size
-assert bounded_size.value = 4019
+    emit Length { value = wide } to core get grown
+    if grown.value ≥ 4500, break
+    wide += "é"
+emit Stringify { value = { state = "completed", exit_code = 0, stdout = wide, stderr = "" } } to json get wide_result
+emit Alive { alive = false, code = 0 } to proc
+emit Respond { command = "cat", arg = "--", stdout = wide_result.value, code = 0 } to proc
+emit Reply { body = "{\"_class\":\"TaskCompleted\",\"id\":\"step-wide\",\"replayed\":false}" } to http
+emit WorkerTick { id = "step-wide" } to this
+emit LastPost to this get wide_report
+assert wide_report.value.particle.id = "step-wide"
+assert wide_report.value.particle.stdout = wide
 
 | ---- No approval-capable client: the task waits, then reports it did not run ----
 
@@ -252,9 +264,10 @@ emit AdvanceWork { now = later.value + 300 } to this
 emit LastPost to this get expired
 assert expired.value.particle.id = "step-2"
 assert expired.value.particle.state = "cancelled"
+| Two workers so far (step-1, step-wide); step-2 never started one.
 emit Spawns { command = "/bin/sh" } to this get never_ran
 emit Length { value = never_ran.items } to core get never_count
-assert never_count.value = 1
+assert never_count.value = 2
 
 | ---- Chat turns belong to the session that started them ----
 

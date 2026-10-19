@@ -12,8 +12,10 @@ import unittest
 WORKER = Path(__file__).resolve().parents[1] / "service/adapters/terminal_worker.py"
 
 
-def invoke(argv, cwd, timeout_seconds=5, env=None):
+def invoke(argv, cwd, timeout_seconds=5, env=None, report_bytes=None):
     request = {"argv": argv, "cwd": str(cwd), "timeout_seconds": timeout_seconds}
+    if report_bytes is not None:
+        request["report_bytes"] = report_bytes
     completed = subprocess.run(
         ["/usr/bin/python3", str(WORKER)], input=json.dumps(request), text=True,
         capture_output=True, timeout=10, env=env,
@@ -59,6 +61,30 @@ class TerminalWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(invoke(["/usr/bin/printf", "x"], "relative")["state"], "rejected")
             self.assertEqual(invoke(["/usr/bin/printf", "x"], directory, 0)["state"], "rejected")
+
+    def test_reported_streams_are_bounded_in_utf8_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = "import sys; print('é' * 3000); print('ж€' * 2000, file=sys.stderr)"
+            result = invoke(["/usr/bin/python3", "-c", script], directory, report_bytes=4096)
+            self.assertEqual(result["state"], "completed")
+            for stream in ("stdout", "stderr"):
+                encoded = result[stream].encode("utf-8")
+                self.assertLessEqual(len(encoded), 4096, stream)
+                self.assertGreater(len(encoded), 4096 - 4 - len(b"\n[output truncated]"), stream)
+                self.assertTrue(result[stream].endswith("\n[output truncated]"), stream)
+            self.assertTrue(result["stdout"].startswith("éé"))
+            small = invoke(["/usr/bin/printf", "%s", "ünïcode"], directory, report_bytes=4096)
+            self.assertEqual(small["stdout"], "ünïcode")
+            plain = invoke(["/usr/bin/python3", "-c", "print('é' * 3000)"], directory)
+            self.assertEqual(len(plain["stdout"]), 3001, "without report_bytes the full capture is returned")
+
+    def test_reason_joins_bounded_stderr_and_bad_limits_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = invoke(["absent-mike-test-command"], directory, report_bytes=4096)
+            self.assertEqual((missing["state"], missing["stderr"]), ("failed", "command not found"))
+            self.assertNotIn("reason", missing)
+            for bad in (0, 63, 40000, True, "4096"):
+                self.assertEqual(invoke(["pwd"], directory, report_bytes=bad)["state"], "rejected", bad)
 
     def test_stop_cancels_a_running_command(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -394,6 +394,29 @@ class Run:
         finally:
             service.stop()
 
+    def scenario_unicode_output(self):
+        """Multi-byte output is bounded to the gateway contract in UTF-8 bytes."""
+        service = self.service("unicode")
+        try:
+            desktop = service.client("desktop")
+            self.paired(desktop)
+            device = self.device_of()["device_id"]
+            step = self.step(["/usr/bin/python3", "-c", "import sys; print('é' * 3000); print('ж€' * 2000, file=sys.stderr)"], device)
+            work = self.work(desktop, step, "awaiting_approval")
+            desktop.answer(work["approval_id"], "approve")
+            result = self.finished(step)["result"]
+            assert result["state"] == "completed" and result["exit_code"] == 0, result
+            sizes = {}
+            for stream in ("stdout", "stderr"):
+                sizes[stream] = len(result[stream].encode("utf-8"))
+                assert sizes[stream] <= 4096 and result[stream].endswith("\n[output truncated]"), (stream, sizes)
+            assert result["stdout"].startswith("é") and result["stderr"].startswith("ж€"), result["stdout"][:10]
+            shown = [one for one in desktop.state()["activity"] if one["kind"] == "result"][-1]
+            assert shown["stdout"] == result["stdout"], "activity and the submitted result differ"
+            return f"é/ж€ output reached the gateway bounded to {sizes['stdout']} and {sizes['stderr']} UTF-8 bytes with the marker"
+        finally:
+            service.stop()
+
     def scenario_file(self):
         service = self.service("file")
         try:
@@ -580,7 +603,7 @@ class Run:
 def main():
     run = Run()
     only = set(filter(None, os.environ.get("MIKE_E2E_ONLY", "").split(",")))
-    order = ["two_clients", "window_absent", "stop_and_decline", "file", "sign_out", "revoke", "account_switch", "crash",
+    order = ["two_clients", "window_absent", "stop_and_decline", "unicode_output", "file", "sign_out", "revoke", "account_switch", "crash",
              "turn", "file_turn"]
     failed = False
     try:

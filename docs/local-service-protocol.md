@@ -153,8 +153,10 @@ file:     awaiting_approval → file_confirm → opening → reporting → (done
   grants unattended execution.
 - `stop` sends SIGTERM to the worker, which kills its command's process
   group; the result is what the worker observed (`cancelled` when stopped).
-- Results are bounded (4000 characters per stream, marked
-  `[output truncated]`) and delivered once; a failed delivery is retried
+- Results are bounded as Mike Desktop always bounded them: at most 4096
+  UTF-8 bytes per stream, the `\n[output truncated]` marker included, cut on
+  a character boundary (the terminal worker's `report_bytes`). They are
+  delivered once; a failed delivery is retried
   with the same result (the gateway answers `replayed`) until the step's
   expiry, never by repeating the effect.
 

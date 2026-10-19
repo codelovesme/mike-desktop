@@ -505,24 +505,17 @@ AdvanceWork { now } =>
         emit FinishWork { state = "cancelled", exit_code = null, stdout = "", stderr = "no local approval was given before the step expired; it did not run", outcome = "declined", detail = "no local approval was given before the task expired; nothing was opened" } to this
     return Advanced
 
-Bound { text } =>
-    if text ∉ String
-        return Bounded { text = "" }
-    emit Length { value = text } to core get size
-    if size.value ≤ 4000
-        return Bounded { text = text }
-    return Bounded { text = text[0, 4000) + "\n[output truncated]" }
-
 | Records the final observation and tries to deliver it. Terminal fields are
 | used for a terminal step, outcome/detail for a file task.
 FinishWork { state, exit_code, stdout, stderr, outcome, detail } =>
     if work = null
         return NoWork
-    emit Bound { text = stdout } to this get out
-    emit Bound { text = stderr } to this get err
-    report = { state = state, exit_code = exit_code, stdout = out.text, stderr = err.text, outcome = outcome, detail = detail }
+    | Command output arrives already bounded by the worker (4096 UTF-8 bytes
+    | per stream, marker included — the gateway contract); the service's own
+    | messages are short.
+    report = { state = state, exit_code = exit_code, stdout = stdout, stderr = stderr, outcome = outcome, detail = detail }
     work = work + { stage = "reporting", report = report, pid = 0 }
-    entry = { kind = "result", text = detail, id = work.id, argv = work.argv, cwd = work.cwd, state = state, exit_code = exit_code, stdout = out.text, stderr = err.text }
+    entry = { kind = "result", text = detail, id = work.id, argv = work.argv, cwd = work.cwd, state = state, exit_code = exit_code, stdout = stdout, stderr = stderr }
     if work.kind = "file"
         entry = entry + { state = outcome }
     emit Remember { entry = entry } to this
@@ -662,7 +655,7 @@ StartTerminal =>
     name = "step-" + spawned
     request_path = runtime_dir + "/" + name + ".request"
     result_path = runtime_dir + "/" + name + ".result"
-    emit Stringify { value = { argv = work.argv, cwd = work.cwd, timeout_seconds = 60 } } to json get request
+    emit Stringify { value = { argv = work.argv, cwd = work.cwd, timeout_seconds = 60, report_bytes = 4096 } } to json get request
     emit WritePrivate { path = request_path, text = request.value } to this get wrote
     if wrote ∉ Written
         emit FinishWork { state = "failed", exit_code = null, stdout = "", stderr = "the local service could not prepare the command", outcome = "", detail = "" } to this
@@ -759,7 +752,6 @@ CollectTerminal =>
                 if found.exit_code ∈ Number, exit_code = found.exit_code
                 if found.stdout ∈ String, stdout = found.stdout
                 if found.stderr ∈ String, stderr = found.stderr
-                if found.reason ∈ String, stderr += found.reason
                 if state = "cancelled" and work.stop_requested and stderr = ""
                     stderr = "stopped locally"
         emit Run { command = "rm", args = ["-f", "--", work.request_path, work.result_path] } to proc
