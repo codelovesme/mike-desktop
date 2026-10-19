@@ -16,6 +16,7 @@ service_version = "0.5.0-dev"
 host_url = "https://apps.codeloves.me"
 state_dir = ""
 runtime_dir = ""
+legacy_dir = ""
 adapters_dir = ""
 own_pid = ""
 user_id = ""
@@ -96,6 +97,10 @@ Configure =>
     emit OptionalSetting { name = "MIKE_SERVICE_STATE_DIR" } to this get chosen_state
     if chosen_state.value ≠ "", state_dir = chosen_state.value
     runtime_dir = state_dir + "/run"
+    | Mike Desktop up to 0.4 kept its pairing here; it is read, never changed.
+    legacy_dir = home.value + "/.local/state/mike-desktop"
+    emit OptionalSetting { name = "MIKE_SERVICE_LEGACY_STATE_DIR" } to this get chosen_legacy
+    if chosen_legacy.value ≠ "", legacy_dir = chosen_legacy.value
     emit OptionalSetting { name = "XDG_RUNTIME_DIR" } to this get xdg
     if xdg.value ≠ "", runtime_dir = xdg.value + "/mike-service"
     emit OptionalSetting { name = "MIKE_SERVICE_RUNTIME_DIR" } to this get chosen_runtime
@@ -255,6 +260,10 @@ StartService =>
         emit Notice { fatal = true, text = "not started: could not publish the endpoint" } to this
         return NotConfigured { reason = "endpoint" }
     emit LoadRecovery to this
+    emit ReadPrivate { path = state_dir + "/revoked" } to this get was_revoked
+    if was_revoked ∈ ReadText
+        revoked_latch = true
+        connection = "revoked"
     running = true
     emit Notice { text = "ready for local clients on 127.0.0.1:" + listen_port + " (protocol " + protocol_version + ", host " + host_url + ")" } to this
     return ServiceStarted
@@ -308,9 +317,70 @@ ForgetIdentity =>
     emit Run { command = "rm", args = ["-f", "--", state_dir + "/owner", state_dir + "/device_id", state_dir + "/credential"] } to proc
     return Forgotten
 
-| Reuse this account's saved pairing; pair afresh only when there is none or
-| the gateway refuses it. An unreachable gateway is offline, not a reason to
-| create a second device.
+| ---- Mike Desktop's pairing, carried over once ----
+|
+| An upgrade from Mike Desktop 0.4 must not leave a second device and inbox.
+| When this service holds no identity at all, the old companion's pairing is
+| offered for the same verified owner — only if its directory is this user's
+| real 0700 directory and each file is this user's non-empty 0600 regular
+| file (inspected without following or changing anything). It is copied,
+| never moved: the old files stay for rollback. The decision is recorded
+| once; a revocation retires it, so it can never come back.
+StatLine { path } =>
+    emit Run { command = "stat", args = ["-c", "%F:%u:%a", "--", path] } to proc get seen
+    if seen ∈ Exception or not seen.success
+        return StatSeen { line = "" }
+    return StatSeen { line = seen.stdout }
+
+LegacyIdentity { owner } =>
+    if legacy_dir = "" or legacy_dir[0, 1) ≠ "/" or user_id = ""
+        return NoLegacy { reason = "no legacy store" }
+    emit ReadPrivate { path = state_dir + "/legacy-migrated" } to this get decided_before
+    if decided_before ∈ ReadText
+        return NoLegacy { reason = "already decided" }
+    emit StatLine { path = state_dir + "/owner" } to this get current
+    if current.line ≠ ""
+        return NoLegacy { reason = "this service already holds an identity" }
+    emit StatLine { path = legacy_dir } to this get folder
+    if folder.line ≠ "directory:" + user_id + ":700\n"
+        return NoLegacy { reason = "the legacy directory is not private" }
+    loop name over ["owner", "device_id", "credential"]
+        emit StatLine { path = legacy_dir + "/" + name } to this get file
+        if file.line ≠ "regular file:" + user_id + ":600\n"
+            return NoLegacy { reason = "a legacy file is not a private regular file" }
+    emit ReadPrivate { path = legacy_dir + "/owner" } to this get saved_owner
+    emit ReadPrivate { path = legacy_dir + "/device_id" } to this get saved_id
+    emit ReadPrivate { path = legacy_dir + "/credential" } to this get saved_secret
+    if saved_owner ∉ ReadText or saved_id ∉ ReadText or saved_secret ∉ ReadText
+        return NoLegacy { reason = "unreadable" }
+    if saved_owner.text ≠ owner
+        return NoLegacy { reason = "another owner" }
+    emit Length { value = saved_id.text } to core get id_size
+    emit Length { value = saved_secret.text } to core get secret_size
+    emit Split { value = saved_id.text + saved_secret.text, separator = "\n" } to strs get lines
+    emit Length { value = lines.value } to core get line_count
+    if id_size.value < 1 or id_size.value > 200 or secret_size.value < 1 or secret_size.value > 512 or line_count.value ≠ 1
+        return NoLegacy { reason = "malformed" }
+    return LegacyFound { device_id = saved_id.text, credential = saved_secret.text }
+
+MarkLegacy { outcome, id } =>
+    emit Timestamp to core get now
+    emit Stringify { value = { outcome = outcome, device_id = id, at = now.value } } to json get text
+    emit WritePrivate { path = state_dir + "/legacy-migrated", text = text.value } to this get wrote
+    return wrote
+
+| A revocation is remembered across restarts: until someone explicitly
+| connects again, neither an automatic sign-in nor the legacy pairing may
+| bring this computer back.
+RememberRevocation =>
+    emit MarkLegacy { outcome = "retired", id = "" } to this
+    emit WritePrivate { path = state_dir + "/revoked", text = "revoked" } to this
+    revoked_latch = true
+    return Remembered
+
+| Reuse this account's saved pairing (or Mike Desktop's, once); pair afresh
+| only when there is none or the gateway refuses it. An unreachable gateway
+| is offline, not a reason to create a second device.
 ConnectAccount { token, email } =>
     account_token = token
     account_email = email
@@ -326,6 +396,23 @@ ConnectAccount { token, email } =>
             emit Notice { text = "connected with this computer's saved pairing" } to this
             return Connected
         emit ForgetIdentity to this
+    if saved ∉ SavedIdentity
+        emit LegacyIdentity { owner = email } to this get legacy
+        if legacy ∈ LegacyFound
+            emit Gateway { particle = Heartbeat { device_id = legacy.device_id, credential = legacy.credential, capabilities = offered.items } } to this get carried
+            if carried ∈ Forbidden
+                emit MarkLegacy { outcome = "refused", id = legacy.device_id } to this
+                emit Notice { text = "the gateway refused Mike Desktop's old pairing; pairing this computer anew" } to this
+            if carried ∉ Forbidden
+                emit SaveIdentity { owner = email, id = legacy.device_id, secret = legacy.credential } to this get adopted
+                if adopted ∈ Written
+                    emit MarkLegacy { outcome = "adopted", id = legacy.device_id } to this
+                device_id = legacy.device_id
+                credential = legacy.credential
+                connection = "offline"
+                if carried ∈ DeviceOnline, connection = "connected"
+                emit Notice { text = "reusing Mike Desktop's pairing for this computer; its old files are kept for rollback" } to this
+                return Connected
     emit Run { command = "uname", args = ["-n"] } to proc get machine
     name = "Mike on this computer"
     if machine ∉ Exception and machine.success
@@ -379,7 +466,7 @@ LoseDevice { detail } =>
     recovery = null
     emit ClearAccount to this
     connection = "revoked"
-    revoked_latch = true
+    emit RememberRevocation to this
     emit Notice { text = "device access revoked; local work stopped and the pairing was forgotten" } to this
     return DeviceLost
 
@@ -948,6 +1035,7 @@ Attach { request } =>
                 emit Fail { status = 503, error = "gateway_unavailable", message = "the device gateway could not connect this computer" } to this get unavailable
                 return unavailable
             revoked_latch = false
+            emit Run { command = "rm", args = ["-f", "--", state_dir + "/revoked"] } to proc
     emit Length { value = sessions } to core get open_sessions
     if open_sessions.value ≥ 16
         emit Fail { status = 429, error = "too_many_clients", message = "too many local clients are attached" } to this get crowded
@@ -1105,7 +1193,7 @@ SignOut { detail } =>
     emit EndGeneration { reason = "signed_out", detail = detail, can_report = true } to this
     emit ClearAccount to this
     connection = "signed_out"
-    revoked_latch = false
+    if revoked_latch, connection = "revoked"
     emit Notice { text = "signed out; local work was stopped" } to this
     return SignedOut
 
@@ -1124,7 +1212,7 @@ RevokeThisDevice =>
     recovery = null
     emit ClearAccount to this
     connection = "revoked"
-    revoked_latch = true
+    emit RememberRevocation to this
     emit Notice { text = "this computer's pairing was revoked by a local client" } to this
     return Answer { status = 200, value = { revoked = true, confirmed_by_gateway = remote } }
 

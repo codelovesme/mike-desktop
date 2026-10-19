@@ -417,6 +417,34 @@ class Run:
         finally:
             service.stop()
 
+    def scenario_legacy_upgrade(self):
+        """An existing Mike Desktop 0.4 pairing keeps its device and inbox."""
+        legacy = Path(self.temporary.name) / "legacy-desktop-state"
+        legacy.mkdir(mode=0o700)
+        paired = api("mike-interface", {"_class": "PairDevice", "name": "Mike Desktop", "platform": "linux"}, self.token)
+        assert paired.get("_class") == "DevicePaired", paired
+        for name, value in (("owner", self.email), ("device_id", paired["device_id"]), ("credential", paired["credential"])):
+            path = legacy / name
+            path.write_text(value)
+            os.chmod(path, 0o600)
+        before = {p.name: p.read_text() for p in legacy.iterdir()}
+        service = self.service("legacy", {"MIKE_SERVICE_LEGACY_STATE_DIR": str(legacy)})
+        try:
+            desktop = service.client("desktop")
+            self.paired(desktop)
+            listed = [one for one in api("mike-interface", {"_class": "MyDevices"}, self.token)["items"]
+                      if one["device_id"] not in self.known and one.get("active")]
+            assert [one["device_id"] for one in listed] == [paired["device_id"]], listed
+            assert listed[0]["online"], listed
+            step = self.step(["pwd"], paired["device_id"])
+            work = self.work(desktop, step, "awaiting_approval")
+            desktop.answer(work["approval_id"], "approve")
+            assert self.finished(step)["result"]["stdout"].strip() == "/tmp"
+            assert {p.name: p.read_text() for p in legacy.iterdir()} == before, "legacy files changed"
+            return "the 0.4 pairing was reused (same device, no second inbox), ran a step, and its files stayed for rollback"
+        finally:
+            service.stop()
+
     def scenario_file(self):
         service = self.service("file")
         try:
@@ -603,7 +631,7 @@ class Run:
 def main():
     run = Run()
     only = set(filter(None, os.environ.get("MIKE_E2E_ONLY", "").split(",")))
-    order = ["two_clients", "window_absent", "stop_and_decline", "unicode_output", "file", "sign_out", "revoke", "account_switch", "crash",
+    order = ["legacy_upgrade", "two_clients", "window_absent", "stop_and_decline", "unicode_output", "file", "sign_out", "revoke", "account_switch", "crash",
              "turn", "file_turn"]
     failed = False
     try:

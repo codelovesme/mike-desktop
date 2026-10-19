@@ -166,16 +166,42 @@ fixed environment. The file opener (`service/adapters/secure_open.py`)
 re-checks the chosen folder and hands a verified descriptor to the document
 portal. Both are OS adapters run by the service; neither decides approval.
 
+## Upgrading from Mike Desktop 0.4
+
+Mike Desktop up to 0.4 kept its pairing in `~/.local/state/mike-desktop`
+(`owner`, `device_id`, `credential`). When the service holds no identity at
+all and an owner connects, it may reuse that pairing — never pairing a
+second device and inbox after an upgrade — only if:
+
+- the legacy directory is this user's real 0700 directory and each file is
+  this user's non-empty 0600 regular file (checked with `stat`, never
+  followed or changed; `MIKE_SERVICE_LEGACY_STATE_DIR` overrides the path);
+- `owner` is exactly the connecting, verified account;
+- the device id and credential are single, bounded lines.
+
+The gateway then decides: a refused credential is recorded and the computer
+pairs anew; an accepted one, or an unreachable gateway (as with any saved
+pairing), is copied into the service's store. The decision is recorded in
+`legacy-migrated` and made once. The legacy files are left in place for
+rollback to 0.4; nothing deletes them. A pairing in the service's store is
+never overwritten by the legacy one, and another owner's legacy files are
+never copied.
+
+A revocation (website or `device/revoke`) is remembered in the state
+directory (`revoked`) and retires the legacy pairing, so neither a restart,
+an automatic sign-in, sign-out, nor the migration can bring the computer
+back; only an explicit `connect=switch` pairs it again, as a new device.
+
 ## Lifecycle: what each event means
 
 | Event | Running command | Pending approval | Pairing | Sessions |
 |---|---|---|---|---|
 | Window closed / `detach` | continues within its bounds; result reported | claim released; waits | kept | that session only |
 | Client stops polling 45 s | as detach | as detach | kept | that session only |
-| `signout` (any client; Desktop's Sign out or the web page signing out) | stopped, reported `cancelled` | reported not run | kept on disk, account token forgotten | all end (`signed_out`) |
+| `signout` (any client; Desktop's Sign out or the web page signing out) | stopped, reported `cancelled` | reported not run | kept on disk, account token forgotten (a remembered revocation stays) | all end (`signed_out`) |
 | `attach … connect=switch` to another account | stopped, reported to the old account | reported to the old account | other account's pairing used/created | all end (`account_changed`) |
-| Revoked on the website (heartbeat refused) | stopped; gateway reports `unknown` | dropped; gateway reports revoked | deleted | all end (`device_revoked`) |
-| `device/revoke` from a client | stopped, reported, then revoked | reported, then revoked | revoked at the gateway, deleted | all end (`device_revoked`) |
+| Revoked on the website (heartbeat refused) | stopped; gateway reports `unknown` | dropped; gateway reports revoked | deleted; revocation remembered across restarts | all end (`device_revoked`) |
+| `device/revoke` from a client | stopped, reported, then revoked | reported, then revoked | revoked at the gateway, deleted; revocation remembered | all end (`device_revoked`) |
 | Service stopped (`systemctl --user stop`) | killed with the unit's cgroup; reported `failed`/unknown after restart | reported not run after restart | kept | gone; account token gone |
 | Service crash / kill | killed with the unit's cgroup (outside systemd the worker's own 60 s limit still applies); reported `failed`/unknown after restart | reported not run after restart | kept | gone |
 

@@ -65,7 +65,10 @@ missing portal causes the task to fail closed. Mike's model cannot supply a
 path for this guided file action. Terminal commands use a separate local
 review and bounded worker.
 
-The pairing survives restart in `~/.local/state/mike-service`, with a private
+Upgrading from 0.4 keeps this computer's existing pairing: the service reuses
+the one in `~/.local/state/mike-desktop` for the same account (and leaves those
+files in place for rollback). The pairing survives restart in
+`~/.local/state/mike-service`, with a private
 directory and credential files; only the service reads them. The account
 session token stays in the service's memory. Other paired computers have
 their own task inboxes, and the website can choose the default target.
