@@ -18,3 +18,10 @@
 - [x] Publish stable v0.3.0, verify `cdlvsm install mike` on clean Debian 13 and Ubuntu 24.04 images, commit, and push.
 
 See `docs/plans/003-mike-desktop-webview.md` for the full product and security design.
+
+Note (ticket 159, 0.5): the native companion and its loopback bridge became
+the shared Mike service. `test_bridge_runtime.py` and the live bridge test
+are replaced by `tests/test_service_runtime.py`, `service/tests/service.code`
+and `tools/service-e2e.py`; the window-level checks above now run against
+the service (`tools/terminal-ui-smoke.py`, `tools/webview-smoke.py`,
+`tools/desktop-file-turn-smoke.py`). The criteria they proved still hold.

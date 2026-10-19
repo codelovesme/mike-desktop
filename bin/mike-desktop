@@ -12,6 +12,19 @@ case "${1:-}" in
   --help|-h) printf 'Usage: mike\nConnects securely to https://apps.codeloves.me. Sign in with your account.\nLocal tasks run in the shared Mike service: see mike-service --help.\n'; exit 0 ;;
 esac
 [ "$#" -eq 0 ] || { echo 'mike: unexpected argument' >&2; exit 2; }
+# The undocumented text-mode window (MIKE_DESKTOP_TEXT_UI=1) was the old
+# companion's own terminal UI. With the companion moved into the shared
+# service it no longer exists; say so rather than opening something else.
+if [ -n "${MIKE_DESKTOP_TEXT_UI:-}" ]; then
+    cat >&2 <<'MSG'
+mike: the text-mode window (MIKE_DESKTOP_TEXT_UI) was retired in 0.5.
+Unset MIKE_DESKTOP_TEXT_UI to open the Mike window: chat, history, apps,
+voice (Speak, voice chat, read aloud) and Mike's approvals are there and on
+the website. Local tasks now run in the shared Mike service (mike-service
+status). A terminal client for the service is separate, planned work.
+MSG
+    exit 2
+fi
 host=${MIKE_DESKTOP_HOST_URL:-https://apps.codeloves.me}
 case "$host" in
   https://apps.codeloves.me) ;;

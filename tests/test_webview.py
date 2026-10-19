@@ -255,5 +255,49 @@ class ServiceClientWindowTest(unittest.TestCase):
         self.assertIn("Mike was told.", text)
 
 
+class MediaAndLegacyTest(unittest.TestCase):
+    """Voice is the page's (Speak, voice chat, read aloud); the window only
+    turns the page's microphone/camera request into a visible native choice."""
+
+    def permission(self, answer):
+        window = bare_window()
+        window.window = Mock()
+        dialog = Mock()
+        dialog.run.return_value = answer
+        request = Mock()
+        original = webview.Gtk.MessageDialog
+        webview.Gtk.MessageDialog = Mock(return_value=dialog)
+        try:
+            handled = window.permission_request(None, request)
+            asked = webview.Gtk.MessageDialog.call_args.kwargs["text"]
+        finally:
+            webview.Gtk.MessageDialog = original
+        self.assertTrue(handled)
+        dialog.destroy.assert_called_once()
+        return request, asked
+
+    def test_microphone_permission_needs_a_native_yes(self):
+        request, asked = self.permission(webview.Gtk.ResponseType.YES)
+        request.allow.assert_called_once()
+        request.deny.assert_not_called()
+        self.assertIn("Allow Mike to use", asked)
+
+    def test_closing_or_refusing_the_permission_denies_it(self):
+        for answer in (webview.Gtk.ResponseType.NO, webview.Gtk.ResponseType.DELETE_EVENT):
+            request, _ = self.permission(answer)
+            request.deny.assert_called_once()
+            request.allow.assert_not_called()
+
+    def test_retired_text_mode_is_refused_explicitly(self):
+        import os
+        import subprocess
+        launcher = Path(__file__).resolve().parents[1] / "bin/mike-desktop"
+        done = subprocess.run([str(launcher)], env=dict(os.environ, MIKE_DESKTOP_TEXT_UI="1"),
+                              capture_output=True, text=True, timeout=10)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("text-mode window (MIKE_DESKTOP_TEXT_UI) was retired", done.stderr)
+        self.assertEqual(done.stdout, "")
+
+
 if __name__ == "__main__":
     unittest.main()

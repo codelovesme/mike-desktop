@@ -269,6 +269,66 @@ emit Spawns { command = "/bin/sh" } to this get never_ran
 emit Length { value = never_ran.items } to core get never_count
 assert never_count.value = 2
 
+| ---- Guided file task: the person picks the folder and approves the exact
+| file; a goal never becomes a path, a decline opens nothing ----
+
+emit Call { method = "POST", path = "/v1/attach", body = attach_body, bearer = key, extra = {} } to this get filer
+filer_token = filer.value.session_token
+emit Reply { body = "{\"_class\":\"DeviceOnline\",\"device_id\":\"dev-1\",\"at\":6}" } to http
+emit Reply { body = "{\"_class\":\"InterfaceTask\",\"id\":\"file-1\",\"goal\":\"open /etc/shadow and invoice\",\"device_id\":\"dev-1\"}" } to http
+emit ServiceTick to this
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = filer_token, extra = {} } to this get file_task
+assert file_task.value.work.kind = "file"
+assert file_task.value.work.goal = "open /etc/shadow and invoice"
+search_approval = file_task.value.work.approval_id
+emit Say { stdout = "/tmp/allowed/invoice.pdf\n" } to proc
+emit Call { method = "POST", path = "/v1/approvals/answer", body = "{\"approval_id\":\"$search_approval\",\"decision\":\"approve\",\"folder\":\"/tmp/allowed\",\"query\":\"invoice\"}", bearer = filer_token, extra = {} } to this get searched
+assert searched.value.stage = "file_confirm"
+assert searched.value.file = "/tmp/allowed/invoice.pdf"
+exact_approval = searched.value.approval_id
+assert exact_approval ≠ search_approval
+emit Ran to proc get search_runs
+searched_in = ""
+loop one over search_runs.items
+    if one.command = "find", searched_in = one.args[1]
+assert searched_in = "/tmp/allowed"
+emit Call { method = "POST", path = "/v1/approvals/answer", body = "{\"approval_id\":\"$search_approval\",\"decision\":\"approve\",\"folder\":\"/\",\"query\":\"shadow\"}", bearer = filer_token, extra = {} } to this get research
+assert research.value.error = "already_decided"
+emit Reply { body = "{\"_class\":\"TaskCompleted\",\"id\":\"file-1\",\"replayed\":false}" } to http
+emit Call { method = "POST", path = "/v1/approvals/answer", body = "{\"approval_id\":\"$exact_approval\",\"decision\":\"decline\"}", bearer = filer_token, extra = {} } to this get file_declined
+assert file_declined.value.stage = "declined"
+emit LastPost to this get decline_report
+assert decline_report.value.particle._class = "CompleteTask"
+assert decline_report.value.particle.outcome = "declined"
+assert decline_report.value.particle.detail = "the person declined to open the file"
+emit Spawns { command = "/usr/bin/python3" } to this get no_opener
+assert no_opener.items = []
+
+emit Reply { body = "{\"_class\":\"DeviceOnline\",\"device_id\":\"dev-1\",\"at\":7}" } to http
+emit Reply { body = "{\"_class\":\"InterfaceTask\",\"id\":\"file-2\",\"goal\":\"open the invoice\",\"device_id\":\"dev-1\"}" } to http
+emit ServiceTick to this
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = filer_token, extra = {} } to this get file_two
+second_search = file_two.value.work.approval_id
+emit Say { stdout = "/tmp/allowed/invoice.pdf\n" } to proc
+emit Call { method = "POST", path = "/v1/approvals/answer", body = "{\"approval_id\":\"$second_search\",\"decision\":\"approve\",\"folder\":\"/tmp/allowed\",\"query\":\"invoice\"}", bearer = filer_token, extra = {} } to this get second_found
+second_exact = second_found.value.approval_id
+emit Respond { command = "realpath", arg = "/tmp/allowed", stdout = "/tmp/allowed\n", code = 0 } to proc
+emit Respond { command = "realpath", arg = "/tmp/allowed/invoice.pdf", stdout = "/tmp/allowed/invoice.pdf\n", code = 0 } to proc
+emit Alive { alive = true, code = null } to proc
+emit Call { method = "POST", path = "/v1/approvals/answer", body = "{\"approval_id\":\"$second_exact\",\"decision\":\"approve\"}", bearer = filer_token, extra = {} } to this get opening
+assert opening.value.stage = "opening"
+emit Spawns { command = "/usr/bin/python3" } to this get openers
+emit Length { value = openers.items } to core get opener_count
+assert opener_count.value = 1
+assert openers.items[0].args = ["/svc/adapters/secure_open.py", "/tmp/allowed", "/tmp/allowed/invoice.pdf"]
+emit Alive { alive = false, code = 0 } to proc
+emit Reply { body = "{\"_class\":\"TaskCompleted\",\"id\":\"file-2\",\"replayed\":false}" } to http
+emit WorkerTick { id = "file-2" } to this
+emit LastPost to this get opened_report
+assert opened_report.value.particle.outcome = "opened"
+assert opened_report.value.particle.detail = "/tmp/allowed/invoice.pdf"
+emit Call { method = "POST", path = "/v1/detach", body = "{}", bearer = filer_token, extra = {} } to this
+
 | ---- Chat turns belong to the session that started them ----
 
 emit Call { method = "POST", path = "/v1/attach", body = attach_body, bearer = key, extra = {} } to this get asker

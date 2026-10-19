@@ -100,6 +100,22 @@ are in [docs/local-service-protocol.md](docs/local-service-protocol.md).
 Google sign-in uses the same external browser connection route when the
 identity provider is configured.
 
+## Retired in 0.5
+
+The undocumented text-mode window (`MIKE_DESKTOP_TEXT_UI=1`) was the old
+companion process drawing its own terminal UI: email/password sign-in,
+typed questions, `/apps`, `/history`, `/speak`/`/read` through
+`arecord`/`aplay`, and Y/N keys for Mike's and the file task's approvals.
+The window has been the published interface since 0.3 (whose README moved
+`/speak` and friends to it), and that companion is now the shared service,
+which has no UI of its own by design. So the text mode is gone, and the
+launcher says so and exits (status 2) when the variable is set instead of
+quietly opening something else. Nothing it offered is lost from the
+published app: the window has chat, history, apps, Speak, voice chat and
+read aloud (microphone and camera only after a native permission dialog),
+Mike's action approval in the page, and the native search, folder and
+exact-file dialogs. A terminal client of the service is separate work.
+
 ## Develop and verify
 
 The Desktop's modules and the service's are pinned to Code 2.12.1 releases;
@@ -141,7 +157,11 @@ and removes it. `tools/terminal-ui-smoke.py` checks the native GTK approval,
 decline, Stop, sign-out, account switch, revocation and window close with a
 disposable account under Xvfb; `tools/terminal-desktop-turn-smoke.py` starts
 a turn inside the real Mike WebView and checks its visible final reply and
-local activity.
+local activity. `tools/desktop-file-turn-smoke.py` asks for a file in the
+window, confirms Mike's action in the page, answers the native search,
+folder, filename and exact-file dialogs, checks the opened file and Mike's
+reply, the Speak/voice chat/read-aloud controls, and that the page's
+microphone request becomes a native permission dialog.
 
 Linux x86_64 is the only packaged desktop platform today. Mobile apps are
 future work.
