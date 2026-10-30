@@ -98,9 +98,15 @@ The account token and the device credential are never returned to a client.
 | `POST /v1/chat/progress` | `turn_id` | `{turn_id, stage, reply, say, steps, work_id, confirmation_id}` |
 | `POST /v1/chat/resume` | `turn_id` | same as progress, after central ownership check |
 | `POST /v1/chat/confirm` | `turn_id`, `yes`, `confirmation_id` | `{sent:bool}` |
+| `POST /v1/chat/hear` | `audio_base64` (≤4,000,000 chars, about a minute of 16 kHz mono WAV), `format`: `wav`\|`webm` | `{text}` — Mike's `Hear`; nothing is kept or asked |
 | `POST /v1/enroll/start` (control) | `account`, `name`? | `{user_code, expires_in, name, account}` |
 | `POST /v1/grants/add` (control) | `root`, `run`, `ask`, `minutes`?, `timeout_seconds`? | `{grant}` |
 | `POST /v1/grants/revoke` (control) | `grant_id` | `{revoked:true}` |
+
+A request body may be up to 4 MiB (the size of a recording to hear).
+`/v1/chat/hear` answers **409 `signed_out`** without an account, **413
+`too_large`** for a longer recording, and **503 `mike_unavailable`** when
+Mike could not make it out.
 
 "Control" routes need a session attached with `approvals: true` (the
 `mike-service enroll|grant|unenroll` commands attach that way). They are the

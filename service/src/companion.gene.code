@@ -12,6 +12,9 @@
 | files.gene.code holds the stateless file search and scope checks.
 
 protocol_version = 1
+| The longest recording /v1/chat/hear takes, as base64 characters: a minute
+| of 16 kHz mono WAV is about 2.6 million (the listener takes 4 MiB).
+hear_most = 4000000
 service_version = "0.5.0-dev"
 host_url = "https://apps.codeloves.me"
 state_dir = ""
@@ -249,7 +252,7 @@ StartService =>
         emit Notice { fatal = true, text = "not started: no random source for the client key" } to this
         return NotConfigured { reason = "no random source" }
     client_key = key.value
-    emit Config { host = "127.0.0.1", port = 0, max_body_bytes = 65536, response_timeout_seconds = 40 } to local get set
+    emit Config { host = "127.0.0.1", port = 0, max_body_bytes = 4194304, response_timeout_seconds = 40 } to local get set
     if set ∈ Exception or not set.ok
         emit Notice { fatal = true, text = "not started: the local listener could not be configured" } to this
         return NotConfigured { reason = "listener" }
@@ -283,9 +286,15 @@ StartService =>
 | ---- Mike Interface: the existing authenticated outward gateway ----
 
 ApiCall { app, particle } =>
+    emit ApiCallWaiting { app = app, particle = particle, seconds = 12 } to this get answer
+    return answer
+
+| The same, waiting up to `seconds` for the answer (a recording to hear
+| takes longer than a question to start).
+ApiCallWaiting { app, particle, seconds } =>
     if app ≠ "auth" and app ≠ "mike" and app ≠ "mike-interface"
         return ApiUnavailable
-    emit Post { url = host_url + "/api/" + app, body = "$particle", content_type = "application/json", timeout_seconds = 12 } to http get response
+    emit Post { url = host_url + "/api/" + app, body = "$particle", content_type = "application/json", timeout_seconds = seconds } to http get response
     if response ∈ Exception or not response.ok or response.status ≠ 200
         return ApiUnavailable
     emit Parse { text = response.body } to json get parsed
@@ -1013,6 +1022,9 @@ Route { method, path, body, headers } =>
     if path = "/v1/chat/ask"
         emit ChatAsk { session = session, request = request } to this get asked
         return asked
+    if path = "/v1/chat/hear"
+        emit ChatHear { request = request } to this get heard
+        return heard
     if path = "/v1/chat/resume"
         emit ChatResume { session = session, request = request } to this get resumed
         return resumed
@@ -1371,6 +1383,29 @@ ChatAsk { session, request } =>
         return unavailable
     emit RememberChat { turn_id = started.turn_id, session = session.id, editor = editor } to this
     return Answer { status = 200, value = { turn_id = started.turn_id } }
+
+| A recording, as words: Mike's `Hear`, the same road a spoken question
+| takes from Mike's own pages. Nothing is kept here; the words go back to
+| the client, which shows them before anything is asked.
+ChatHear { request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
+        return out
+    if request.audio_base64 ∉ String or request.audio_base64 = ""
+        emit Fail { status = 400, error = "bad_request", message = "audio_base64 is required" } to this get empty
+        return empty
+    emit Length { value = request.audio_base64 } to core get size
+    if size.value > hear_most
+        emit Fail { status = 413, error = "too_large", message = "the recording is longer than the service takes" } to this get long
+        return long
+    if request.format ≠ "wav" and request.format ≠ "webm"
+        emit Fail { status = 400, error = "bad_request", message = "format is wav or webm" } to this get format
+        return format
+    emit ApiCallWaiting { app = "mike", particle = Impulse { token = account_token, particle = Hear { audio_base64 = request.audio_base64, format = request.format } }, seconds = 35 } to this get heard
+    if heard ∉ Heard or heard.text ∉ String
+        emit Fail { status = 503, error = "mike_unavailable", message = "Mike could not make out the recording" } to this get unavailable
+        return unavailable
+    return Answer { status = 200, value = { text = heard.text } }
 
 | Session bindings are a bounded working set, not another chat database.
 RememberChat { turn_id, session, editor } =>

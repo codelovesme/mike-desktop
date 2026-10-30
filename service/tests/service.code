@@ -113,6 +113,9 @@ assert watcher.value.session_token ≠ desktop.value.session_token
 desk = desktop.value.session_token
 watch = watcher.value.session_token
 assert watcher.value.state.clients = 2
+| Hearing needs an account, like a question.
+emit Call { method = "POST", path = "/v1/chat/hear", body = "{\"audio_base64\":\"UklGRg==\",\"format\":\"wav\"}", bearer = desk, extra = {} } to this get hear_signed_out
+assert hear_signed_out.status = 409 and hear_signed_out.value.error = "signed_out"
 assert watcher.value.state.approval_clients = 1
 
 | Connecting pairs this computer once; the credential never reaches a client.
@@ -394,6 +397,21 @@ assert editor_report.value.particle.editor_result.state = "buffer_only"
 emit Reply { body = "{\"_class\":\"EditorClosed\"}" } to http
 emit Call { method = "POST", path = "/v1/editor/close", body = "{\"turn_id\":\"editor-turn\"}", bearer = asker_token, extra = {} } to this get editor_closed
 assert editor_closed.value.acknowledged
+
+| A recording becomes words through Mike's Hear; nothing else is asked.
+emit Reply { body = "{\"_class\":\"Heard\",\"text\":\"open the readme\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/hear", body = "{\"audio_base64\":\"UklGRg==\",\"format\":\"wav\"}", bearer = asker_token, extra = {} } to this get heard
+assert heard.status = 200 and heard.value.text = "open the readme"
+emit LastPost to this get hear_post
+assert hear_post.value.particle._class = "Hear"
+assert hear_post.value.particle.format = "wav" and hear_post.value.particle.audio_base64 = "UklGRg=="
+emit Call { method = "POST", path = "/v1/chat/hear", body = "{\"audio_base64\":\"\",\"format\":\"wav\"}", bearer = asker_token, extra = {} } to this get unheard
+assert unheard.status = 400
+emit Call { method = "POST", path = "/v1/chat/hear", body = "{\"audio_base64\":\"UklGRg==\",\"format\":\"mp3\"}", bearer = asker_token, extra = {} } to this get odd_format
+assert odd_format.status = 400
+emit Reply { body = "{\"_class\":\"Failed\",\"reason\":\"I could not make out the recording.\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/hear", body = "{\"audio_base64\":\"UklGRg==\",\"format\":\"webm\"}", bearer = asker_token, extra = {} } to this get not_made_out
+assert not_made_out.status = 503 and not_made_out.value.error = "mike_unavailable"
 
 | ---- Account change: the old owner's running command is stopped and
 | reported with the old owner's credentials; every session must re-attach ----
