@@ -119,7 +119,7 @@ def main():
     if cli_only:
         stage = fresh(out, f"mike-cli-{version}-x86_64-linux")
         (stage / "client").mkdir()
-        for name in ("mike_service.py", "cli.py"):
+        for name in ("mike_service.py", "sign_in.py", "cli.py"):
             shutil.copy2(ROOT / "client" / name, stage / "client" / name)
         shutil.copy2(ROOT / "bin/mike-cli", stage / "mike-cli")
         shutil.copy2(ROOT / "docs/cli.md", stage / "README.md")

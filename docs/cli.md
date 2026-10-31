@@ -1,12 +1,34 @@
 # Mike in a terminal
 
 `bin/mike-cli` in the checkout; `mike-cli` in its independently staged
-package. It attaches to this user's existing shared Mike service, never starts
-a model, another paired executor or its own service. `mike` and
-`mike-desktop` keep opening Desktop. IDE and Desktop do not depend on CLI.
+package (`cdlvsm install mike-cli`). It is Mike the way Claude Code and Codex
+are themselves: a program for any terminal — the ide's terminal tab
+included — that signs in and talks on its own. It attaches to this user's
+shared Mike service and never starts a model or another paired executor.
+`mike` and `mike-desktop` keep opening Desktop. Neither Desktop nor the ide
+is needed.
 
-Start the shared service with `mike-service start`. Sign in via Desktop's
-browser handoff, or use `mike-cli --connect` and paste an account session token
+## Signing in
+
+```
+mike-cli --sign-in          # the browser opens; sign in, press Connect
+mike-cli --account          # who is signed in on this computer
+mike-cli --switch-account   # sign in as someone else (an explicit choice)
+mike-cli --sign-out         # sign this computer out of Mike
+```
+
+`--sign-in` starts the shared service first if it is not running, then
+opens codelovesme's `/desktop/connect` page (the handoff Desktop uses: a
+one-use state, the session token posted to a loopback callback straight
+into the service — never saved by CLI, printed or put in argv). With no
+browser to open it prints the address to open on this computer. A
+different account than the service's is refused unless `--switch-account`.
+In a terminal, plain `mike-cli` offers both when they are missing — "Start
+it?", then "Sign in … in the browser?" — and does neither unasked; a
+pipeline or `--ask` run never does.
+
+Desktop, the CLI and every other client share the one sign-in of the
+service. `mike-cli --connect` still takes a pasted account session token
 into its hidden terminal prompt. The token is passed to the existing service
 for account verification, never saved by CLI, placed in argv or printed.
 `--token-stdin` reads one protected stdin line for a `--ask`/`--resume` run.
@@ -22,6 +44,17 @@ mike-cli --ask 'Run the tests'    # one turn, then exit
 mike-cli --resume TURN_ID         # explicit central-turn continuation
 printf 'What can you do?' | mike-cli
 ```
+
+## The prompt
+
+`mike> ` is a line editor (readline): the caret moves, ↑/↓ go through
+earlier messages, kept between runs in `$XDG_STATE_HOME/mike-cli/history`
+(0600). What Mike says is printed above the line being typed, which comes
+back as it was. A message sent while Mike is still on one waits its turn
+(ten at most, `Queued (n waiting)`) and goes when that turn ends; `/unqueue`
+takes them back unsent. Ctrl-D, like Ctrl-C, detaches.
+
+## Conversations
 
 The project defaults to the starting directory. Its absolute path and this
 service's device id go to central Mike as context, **not permission**. Central

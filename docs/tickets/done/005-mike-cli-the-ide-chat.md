@@ -19,30 +19,38 @@ requires mike-service). Two things are missing for it to stand alone:
 
 Acceptance criteria:
 
-- [ ] `cdlvsm install mike-cli`, then `mike-cli` in a fresh terminal with
+- [x] `cdlvsm install mike-cli`, then `mike-cli` in a fresh terminal with
       nothing signed in: it offers to sign in, opens the browser (the
       ordinary account page, `/desktop/connect` handoff to a one-time
       loopback callback, as the ide's Account sign-in did in
       `ide/tools/mike_bridge.py`), and after Connect the chat is ready. On
       a machine with no browser it prints the URL to open elsewhere.
-- [ ] `mike-cli --sign-out` and `mike-cli --account` (who is signed in);
+- [x] `mike-cli --sign-out` and `mike-cli --account` (who is signed in);
       the credential is kept as the service keeps it today, never printed.
-- [ ] The chat screen: input box with caret, wrap, ↑/↓ history, Enter
+- [x] The chat screen: input box with caret, wrap, ↑/↓ history, Enter
       sends, a message typed during a turn waits in a queue; progress and
       approvals (`/approve`, `/yes` … as today) stay.
-- [ ] It works inside the ide's terminal tab exactly as in a plain terminal
+- [x] It works inside the ide's terminal tab exactly as in a plain terminal
       (keys, resize, colours); checked in a real pty.
-- [ ] The project is the folder it starts in, as today.
-- [ ] Desktop, the service and today's `--ask` / non-TTY modes keep working;
+- [x] The project is the folder it starts in, as today.
+- [x] Desktop, the service and today's `--ask` / non-TTY modes keep working;
       existing tests green; a pty smoke for sign-in-less start, chat, quit.
-- [ ] Released (patch/minor) and installed; the ide's README points to it
+- [x] Released (patch/minor) and installed; the ide's README points to it
       for AI ("run `mike-cli`, `claude` or `codex` in a terminal tab").
 
-Open questions for the owner:
+Decided (2026-10-31, the owner left it to me): the command stays
+`mike-cli` (`mike` keeps opening Desktop, so nothing installed changes
+meaning); it talks with Mike only — no local model, which would bring back
+the dependency 009 removed; voice input is dropped, not moved.
 
-- The command name: keep `mike-cli`, or make `mike` the CLI (it opens
-  Desktop today)?
-- The ide chat could also talk to the local model (LocalAI) and edit files
-  itself. Does Mike CLI carry that, or only Mike?
-- Voice input (Ctrl+Shift+Space in the ide): move it into Mike CLI, or
-  drop it?
+Done (2026-10-31): client/sign_in.py (the browser handoff, the service
+started first, a different account refused unless --switch-account);
+`--sign-in`, `--account`, `--switch-account`, `--sign-out`; an interactive
+start offers the service and the sign-in, never unasked. The prompt is
+readline in its own thread (caret, ↑/↓ history in
+$XDG_STATE_HOME/mike-cli/history, 0600), Mike's output printed above the
+typed line, a queue of ten with /unqueue. tests/test_cli_sign_in.py (12) +
+tests/test_cli.py (17) green; tools/cli-pty-smoke.py 11/11 in a real pty;
+`mike-cli --account` against the real service on this machine. "Released"
+means v0.5.2 (patch, so it stays in the 0.5 service series Desktop 0.5.1
+pins).
