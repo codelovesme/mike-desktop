@@ -467,3 +467,20 @@ only the spoken response route permits a larger bounded audio response.
 CLI capture/playback workers carry an epoch. Manual cancellation, account
 change, failure and exit cannot replay a request or let a stale callback send
 a new message/reopen the microphone. No audio is stored in conversation history.
+
+## Explicit remote execution mode (ticket 198)
+
+`Capabilities` now includes `terminal_modes_v1`. The authenticated gateway's
+`TerminalStep` may carry `approval_mode=auto` or `ask`. Auto executes without
+local approval or a per-command grant. Ask executes only with `confirmed=true`
+from the gateway's exact owner/version-checked confirmation, not a local UI.
+The target device ID must match. Any other explicit mode, unconfirmed Ask,
+duplicate delivery or root unattended execution is refused. A missing mode keeps
+the legacy grant/local-approval contract. The service's bounded `work` state
+includes the execution mode. Time/output/stop and generation boundaries remain.
+
+The selected per-turn mode supersedes old documentation describing Auto as
+“only granted commands.” Grant-based calls remain supported for legacy callers;
+mode-based operation does not add a persistent wildcard grant or an expiry timer
+for each command. Current selection must be explicit in the originating Mike
+request. Switching another client's mode cannot alter an accepted turn/task.

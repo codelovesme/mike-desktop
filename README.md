@@ -228,3 +228,20 @@ and removes the saved session. Explicit account switching replaces it; ordinary
 auto-connect cannot change another account. Device revocation prevents restore.
 The saved access token retains its real expiry: this is not an indefinite login
 or an offline bypass. If the service was stopped beyond expiry, sign in again.
+
+### Auto, Ask and Plan from remote Mike (ticket 198)
+
+Select Auto in Mike's model/mode controls to run commands on the selected device
+as the service OS user without individual approvals or per-command grants. Ask
+requests the exact command's confirmation in Mike, including from mobile web;
+Plan executes nothing. The service advertises `terminal_modes_v1` and receives
+its mode through the authenticated gateway task, never from terminal output or
+an untrusted model-supplied field. No Desktop/CLI window needs to stay open.
+
+Commands keep existing timeout/output limits and stop on device revocation,
+sign-out/account change as before. Ask requires the owner's exact gateway
+confirmation. Duplicate tasks and another device's tasks do not execute. Auto
+is not a sandbox and does not provide root privileges. Unspecified legacy tasks
+retain their original grant/local-review behavior; older services need an
+upgrade for mode-based remote Auto. A mode change applies to subsequent turns;
+it does not silently change a task already accepted under another mode.

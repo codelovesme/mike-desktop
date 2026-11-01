@@ -60,8 +60,8 @@ seen_tasks = []
 Capabilities =>
     | A server has no person at the screen to pick a folder or see a file.
     if headless
-        return DeviceCapabilities { items = ["terminal"] }
-    return DeviceCapabilities { items = ["file_search", "file_open", "terminal"] }
+        return DeviceCapabilities { items = ["terminal", "terminal_modes_v1"] }
+    return DeviceCapabilities { items = ["file_search", "file_open", "terminal", "terminal_modes_v1"] }
 
 | Only the fixed public service or an explicit loopback test host. No task
 | field ever becomes part of a URL.
@@ -704,6 +704,7 @@ ReceiveWork { task } =>
         report = null
         report_until = now.value + 290
         grant_id = grant_id
+        approval_mode = task.approval_mode
         timeout = 60
     }
     emit MarkInflight { stage = "claimed" } to this
@@ -716,10 +717,26 @@ ReceiveWork { task } =>
     if repeated.yes
         emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "this step was delivered again; this computer already received it once and does not repeat it", outcome = "failed", detail = "this task was delivered again; it is not repeated" } to this
         return WorkReceived
+    if task.device_id ≠ device_id
+        emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "this task belongs to another device; it did not run", outcome = "failed", detail = "wrong device" } to this
+        return WorkReceived
     if kind = "terminal"
         valid = argv ∈ Array and argv ≠ [] and cwd ∈ String and cwd ≠ ""
         if not valid
             emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "the step had no valid command", outcome = "failed", detail = "" } to this
+            return WorkReceived
+        if task.approval_mode ≠ null
+            if task.approval_mode ≠ "auto" and task.approval_mode ≠ "ask"
+                emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "unknown terminal mode; it did not run", outcome = "failed", detail = "" } to this
+                return WorkReceived
+            if task.approval_mode = "ask" and task.confirmed ≠ true
+                emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "Ask mode has no confirmed owner answer; it did not run", outcome = "failed", detail = "" } to this
+                return WorkReceived
+            if user_id = "0"
+                emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "mode-based unattended commands are refused for root; run Mike as your ordinary user", outcome = "failed", detail = "" } to this
+                return WorkReceived
+            emit Note { text = "Running under the person's selected " + task.approval_mode + " mode." } to this
+            emit StartTerminal to this
             return WorkReceived
         if grant_id ≠ ""
             emit GrantCheck { grant_id = grant_id, argv = argv, cwd = cwd, confirmed = task.confirmed = true } to this get allowed
@@ -1305,7 +1322,7 @@ StateFor { session } =>
         approval_id = ""
         awaiting = work.stage = "awaiting_approval" or work.stage = "file_confirm"
         if session.approvals and awaiting, approval_id = work.approval_id
-        view = { id = work.id, kind = work.kind, stage = work.stage, claim = claim, approval_id = approval_id, argv = work.argv, cwd = work.cwd, goal = work.goal, folder = work.folder, file = work.file, seconds_left = work.deadline - now.value }
+        view = { id = work.id, kind = work.kind, approval_mode = work.approval_mode, stage = work.stage, claim = claim, approval_id = approval_id, argv = work.argv, cwd = work.cwd, goal = work.goal, folder = work.folder, file = work.file, seconds_left = work.deadline - now.value }
     emit Capabilities to this get offered
     enrollment_view = null
     if enrollment ≠ null

@@ -142,7 +142,7 @@ emit Call { method = "GET", path = "/v1/state", body = "", bearer = view } to th
 assert enrolled.value.paired
 assert enrolled.value.headless
 assert enrolled.value.account = "ada@example.test"
-assert enrolled.value.capabilities = ["terminal"]
+assert enrolled.value.capabilities = ["terminal", "terminal_modes_v1"]
 assert enrolled.value.enrollment.state = "confirmed"
 emit Stringify { value = enrolled.value } to json get enrolled_text
 emit Includes { text = enrolled_text.value, needle = secret } to this get leaked_after
@@ -295,6 +295,34 @@ emit Call { method = "POST", path = "/v1/grants/revoke", body = "{\"grant_id\":\
 assert local_revoke.status = 200
 emit Call { method = "POST", path = "/v1/grants/revoke", body = "{\"grant_id\":\"" + regranted.value.grant.id + "\"}", bearer = ctl } to this get revoke_again
 assert revoke_again.status = 404
+
+| ---- User-selected modes: no per-command grant required in Auto ----
+emit Alive { alive = true, code = null } to proc
+emit Workers to this get before_auto
+emit Deliver { kind = "TerminalStep", step = { id = "mode-auto", argv = ["pwd"], cwd = "/tmp", device_id = "srv-1", approval_mode = "auto" } } to this get auto_delivery
+emit Workers to this get after_auto
+assert after_auto.count = before_auto.count + 1
+emit Call { method = "GET", path = "/v1/state", body = "", bearer = view } to this get auto_state
+assert auto_state.value.work.stage = "running"
+assert auto_state.value.work.approval_mode = "auto"
+emit AbandonWork { detail = "test ends auto work", can_report = true } to this
+emit Forget to http
+emit Alive { alive = true, code = null } to proc
+emit Deliver { kind = "TerminalStep", step = { id = "mode-ask-unconfirmed", argv = ["pwd"], cwd = "/tmp", device_id = "srv-1", approval_mode = "ask", confirmed = false } } to this get unconfirmed_mode
+assert unconfirmed_mode.report.state = "rejected"
+emit Deliver { kind = "TerminalStep", step = { id = "mode-plan", argv = ["pwd"], cwd = "/tmp", device_id = "srv-1", approval_mode = "plan" } } to this get plan_mode
+assert plan_mode.report.state = "rejected"
+emit Deliver { kind = "TerminalStep", step = { id = "mode-wrong-device", argv = ["pwd"], cwd = "/tmp", device_id = "another", approval_mode = "auto" } } to this get wrong_device
+assert wrong_device.report.state = "rejected"
+emit Workers to this get after_refused_modes
+assert after_refused_modes.count = after_auto.count
+emit Deliver { kind = "TerminalStep", step = { id = "mode-ask-confirmed", argv = ["pwd"], cwd = "/tmp", device_id = "srv-1", approval_mode = "ask", confirmed = true } } to this get confirmed_mode
+emit Workers to this get confirmed_workers
+assert confirmed_workers.count = after_auto.count + 1
+emit AbandonWork { detail = "test ends confirmed Ask work", can_report = true } to this
+emit Forget to http
+emit Deliver { kind = "TerminalStep", step = { id = "mode-auto", argv = ["pwd"], cwd = "/tmp", device_id = "srv-1", approval_mode = "auto" } } to this get duplicate_auto
+assert duplicate_auto.report.state = "rejected"
 
 | ---- Unenrolling ends the device at the gateway with its own credential ----
 
