@@ -1159,6 +1159,12 @@ Route { method, path, body, headers } =>
     if path = "/v1/chat/spoken"
         emit ChatSpoken { session = session, request = request } to this get spoken
         return spoken
+    if path = "/v1/chat/conversations"
+        emit ChatConversations { request = request } to this get conversations
+        return conversations
+    if path = "/v1/chat/history"
+        emit ChatHistory { request = request } to this get history
+        return history
     if path = "/v1/chat/resume"
         emit ChatResume { session = session, request = request } to this get resumed
         return resumed
@@ -1341,6 +1347,7 @@ StateFor { session } =>
         device_id = device_id
         editor_version = 1
         chat_version = 2
+        conversations = true
         voice_chat = true
         model = session.model
         thinking = session.thinking
@@ -1550,7 +1557,7 @@ ChatAsk { session, request } =>
             emit Fail { status = 503, error = "no_random_source", message = "could not bind editor" } to this get no_binding
             return no_binding
         editor = { binding = binding.value, mode = mode, workspace = workspace, context = request.editor.context }
-    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text, device_id = device_id, workspace = workspace, editor = editor, model = request.model, thinking = request.thinking, mode = request.mode, images = request.images } } } to this get started
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text, conversation_id = request.conversation_id, device_id = device_id, workspace = workspace, editor = editor, model = request.model, thinking = request.thinking, mode = request.mode, images = request.images } } } to this get started
     if started ∉ Thinking
         reason = "Mike did not start the turn"
         if started.reason ∈ String, reason = started.reason
@@ -1562,7 +1569,49 @@ ChatAsk { session, request } =>
         selected_sessions += [one]
     sessions = selected_sessions
     emit RememberChat { turn_id = started.turn_id, session = session.id, editor = editor } to this
-    return Answer { status = 200, value = { turn_id = started.turn_id } }
+    return Answer { status = 200, value = { turn_id = started.turn_id, conversation_id = started.conversation_id } }
+
+| The person's conversations with Mike, the same list Mike's pages show:
+| `device = "this"` narrows it to the ones this computer took part in.
+| Device names come along so a client can say where each one happened.
+ChatConversations { request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
+        return out
+    filter = ""
+    if request.device = "this", filter = device_id
+    if request.device ∈ String and request.device ≠ "this" and request.device ≠ "all", filter = request.device
+    limit = 20
+    if request.limit ∈ Number and request.limit > 0 and request.limit < 101, limit = request.limit
+    skip = 0
+    if request.skip ∈ Number and request.skip ≥ 0, skip = request.skip
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Conversations { device_id = filter, limit = limit, skip = skip } } } to this get listed
+    if listed ∉ ConversationList or not listed.ok
+        emit Fail { status = 503, error = "mike_unavailable", message = "Mike's conversations are unavailable" } to this get unavailable
+        return unavailable
+    named = []
+    emit Gateway { particle = MyDevices } to this get mine
+    if mine ∈ Devices
+        loop one over mine.items
+            named += [{ device_id = one.device_id, name = one.name, online = one.online = true }]
+    return Answer { status = 200, value = { items = listed.items, has_more = listed.has_more, devices = named, this_device = device_id } }
+
+| One conversation's turns, oldest first, to show before continuing it.
+ChatHistory { request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
+        return out
+    if request.conversation_id ∉ String or request.conversation_id = ""
+        emit Fail { status = 400, error = "bad_request", message = "conversation_id is required" } to this get empty
+        return empty
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = RecentConversation { conversation_id = request.conversation_id, limit = 50, skip = 0 } } } to this get recent
+    if recent ∉ Recent or not recent.ok
+        emit Fail { status = 503, error = "mike_unavailable", message = "Mike's history is unavailable" } to this get unavailable
+        return unavailable
+    shown = []
+    loop one over recent.turns
+        shown += [{ text = one.text, reply = one.reply }]
+    return Answer { status = 200, value = { conversation_id = request.conversation_id, turns = shown, has_more = recent.has_more } }
 
 | A recording, as words: Mike's `Hear`, the same road a spoken question
 | takes from Mike's own pages. Nothing is kept here; the words go back to

@@ -41,6 +41,8 @@ class Terminal:
         self.service, self.workspace, self.interactive, self.output = service, workspace, interactive, output
         self.owner = ''
         self.turn = ''
+        self.conversation = ''  # '' = the next message starts a new conversation
+        self.listed = []        # the conversations /conversations last showed
         self.view = {}
         self.local = None
         self.shown = set()
@@ -133,12 +135,17 @@ class Terminal:
         if self.prompt: self.emit('you', None, text)
         # Never retry this POST: a lost reply may already have started a turn.
         body = {'text':submitted, 'workspace':self.workspace}
+        if self.status.get('conversations'):
+            body['conversation_id'] = self.conversation
         if self.status.get('chat_version') == 2:
             body.update(selected)
             body['images'] = attachments
         elif attachments:
             raise ValueError('upgrade Mike service to send images')
-        self.turn = self.service.call('/v1/chat/ask', body)['turn_id']
+        started = self.service.call('/v1/chat/ask', body)
+        self.turn = started['turn_id']
+        if isinstance(started.get('conversation_id'), str):
+            self.conversation = started['conversation_id']
         self.steps, self.finished, self.shown, self.view = 0, False, set(), {}
         self.started = time.monotonic()
         if not self.prompt: self.show(f'Turn {self.turn} (resume with --resume {self.turn})')
@@ -223,6 +230,52 @@ class Terminal:
             return 'Mike: ' + str(steps[-1].get('say', ''))[:60]
         return 'Mike is thinking'
 
+    def supports_conversations(self):
+        if not self.status.get('conversations'):
+            raise ValueError('upgrade mike-service to list conversations')
+
+    def conversations(self, arg=''):
+        """The person's conversations with Mike, the same list Mike's pages
+        show: this computer's by default, `all` for every one."""
+        self.supports_conversations()
+        which = 'all' if arg == 'all' else 'this'
+        found = self.service.call('/v1/chat/conversations', {'device': which, 'limit': 20})
+        names = {d['device_id']: d.get('name', '') for d in found.get('devices', [])}
+        self.listed = found.get('items', [])
+        if not self.listed:
+            self.show('No conversations on this computer yet; /conversations all lists every one.' if which == 'this'
+                      else 'No conversations yet.')
+            return
+        lines = ['This computer\'s conversations:' if which == 'this' else 'Your conversations:']
+        for number, one in enumerate(self.listed, 1):
+            when = time.strftime('%Y-%m-%d %H:%M', time.localtime(one.get('updated_at') or 0))
+            where = ', '.join(names[d] for d in one.get('devices', []) if names.get(d))
+            mark = ' (open)' if one.get('id') == self.conversation else ''
+            lines.append(f"{number:>2}. {one.get('title', '')}{mark}\n    {when}{' · ' + where if where else ''}")
+        lines.append('/open N continues one; /new starts a new one.' + ('' if which == 'all' else ' /conversations all lists every computer\'s.'))
+        self.show('\n'.join(lines))
+
+    def open(self, arg):
+        """Continue a conversation: its history first, then the prompt."""
+        self.supports_conversations()
+        if not arg:
+            raise ValueError('/open needs a number from /conversations')
+        chosen = arg
+        if arg.isdigit():
+            if not 1 <= int(arg) <= len(self.listed):
+                raise ValueError('no such number; /conversations lists them')
+            chosen = self.listed[int(arg) - 1]['id']
+        if self.turn and not self.finished:
+            raise ValueError('a turn is still active; wait for it or /leave first')
+        history = self.service.call('/v1/chat/history', {'conversation_id': chosen})
+        self.conversation = chosen
+        self.turn, self.view, self.local, self.finished = '', {}, None, False
+        title = next((one.get('title', '') for one in self.listed if one.get('id') == chosen), '')
+        self.show('Continuing: ' + (title or chosen) + ('\n(earlier messages not shown)' if history.get('has_more') else ''))
+        for one in history.get('turns', []):
+            self.emit('you', 'You: ' + str(one.get('text', '')), str(one.get('text', '')))
+            self.emit('mike', 'Mike: ' + str(one.get('reply', '')), str(one.get('reply', '')))
+
     @staticmethod
     def matches(given, nonce):
         return isinstance(nonce, str) and len(given) >= 12 and (given == nonce or given == nonce[:12])
@@ -259,9 +312,18 @@ class Terminal:
                 self.options['mode'] = arg
             self.show('Next message: ' + ', '.join(f'{k}={v}' for k,v in self.options.items()))
             return
+        if verb in ('/conversations', '/c'):
+            self.conversations(arg)
+            return
+        if verb == '/open':
+            self.open(arg)
+            return
         if verb in ('/new', '/leave'):
             self.show(f'Left turn {self.turn or "(none)"}; accepted work is not cancelled.')
             self.turn, self.view, self.local, self.finished = '', {}, None, False
+            if verb == '/new':
+                self.conversation = ''
+                self.show('The next message starts a new conversation.')
         elif verb == '/unqueue':
             if not self.waiting:
                 self.show('Nothing is waiting.')
@@ -312,7 +374,7 @@ class Terminal:
             self.show('\n'.join(f"{name} {args}".strip().ljust(18) + what for name, args, what in COMMANDS)
                       + '\n\n' + '\n'.join(k.ljust(30) + v for k, v in SHORTCUTS))
         elif verb == '/help':
-            self.show('/yes ID, /no ID: answer the displayed question; /approve ID, /decline ID: local decision\n/find ID QUERY: file search in this project; /stop: current local command only\n/resume TURN, /leave, /new, /unqueue, /quit. Enter alone never approves; a message typed while Mike works waits its turn.\n↑/↓ earlier messages. Ctrl-C or Ctrl-D detaches; the service stays alive.\nAccount: mike-cli --account, --sign-in, --switch-account, --sign-out.')
+            self.show('/yes ID, /no ID: answer the displayed question; /approve ID, /decline ID: local decision\n/find ID QUERY: file search in this project; /stop: current local command only\n/conversations [all], /open N: continue an earlier conversation; /new: a new one\n/resume TURN, /leave, /unqueue, /quit. Enter alone never approves; a message typed while Mike works waits its turn.\n↑/↓ earlier messages. Ctrl-C or Ctrl-D detaches; the service stays alive.\nAccount: mike-cli --account, --sign-in, --switch-account, --sign-out.')
         else:
             self.show('Unknown command. /help lists commands.')
 
