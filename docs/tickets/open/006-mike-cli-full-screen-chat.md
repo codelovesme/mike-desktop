@@ -41,10 +41,11 @@ answers need Mike itself: see my-euglena-apps ticket 185.
   Enter or 1/2 (`Yes` / `No`; for a file request: search this project for…
   / decline). Enter alone never approves without a visible selection.
   Typed `/yes ID` … keep working.
-- **Voice.** Ctrl+R starts recording (PipeWire, PulseAudio or ALSA,
-  whichever is there); the footer shows a red `● REC 0:03`; Ctrl+R again
-  stops, the footer shows `transcribing…`, and the words land in the box to
-  be edited before sending. A minute at most. No recorder → a clear message.
+- **Voice (updated by workspace ticket 188).** Hold Ctrl+Space to record
+  (PipeWire, PulseAudio or ALSA). Releasing Space or Control stops; the words
+  land in the draft after transcription. Repeats do not toggle recording.
+  The microphone closes on focus loss/exit and after at most one minute.
+  Needs a terminal with release events; no recorder → a clear message.
 - **Footer.** Account, project folder, queue size, and `? for shortcuts`;
   model, thinking level and mode appear here as soon as the service
   reports them (185).

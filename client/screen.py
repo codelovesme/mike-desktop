@@ -70,7 +70,7 @@ SHORTCUTS = [
     ('/', 'commands'),
     ('↑ ↓', 'move between lines, then earlier messages'),
     ('ctrl+v', 'paste an image (or text) from the clipboard'),
-    ('ctrl+r', 'record your voice; again to stop'),
+    ('ctrl+space', 'hold to record; release to transcribe'),
     ('esc', 'close a menu · stop the running command'),
     ('ctrl+c', 'clear the box · twice to leave'),
     ('ctrl+d', 'leave'),
@@ -404,7 +404,7 @@ def write_history(path, entries):
 CONTROL = {'\r': 'enter', '\n': 'newline', '\t': 'tab', '\x7f': 'backspace', '\x08': 'backspace',
            '\x01': 'home', '\x05': 'end', '\x02': 'left', '\x06': 'right', '\x15': 'kill-before',
            '\x0b': 'kill-after', '\x17': 'kill-word', '\x03': 'ctrl-c', '\x04': 'ctrl-d',
-           '\x12': 'ctrl-r', '\x16': 'ctrl-v', '\x0c': 'ctrl-l', '\x10': 'up', '\x0e': 'down'}
+           '\x00': 'ctrl-space', '\x16': 'ctrl-v', '\x0c': 'ctrl-l', '\x10': 'up', '\x0e': 'down'}
 CSI_FINAL = {'A': 'up', 'B': 'down', 'C': 'right', 'D': 'left', 'H': 'home', 'F': 'end', 'Z': 'shift-tab'}
 CSI_TILDE = {'1': 'home', '7': 'home', '4': 'end', '8': 'end', '3': 'delete', '5': 'page-up', '6': 'page-down'}
 
@@ -446,18 +446,47 @@ def parse_keys(s, final=False):
                     break
                 params, fin = s[i + 2:j], s[j]
                 i = j + 1
+                if fin == 'u' and params.startswith('?'):
+                    push('keyboard', params[1:])
+                    continue
                 mods = params.split(';')
+                if fin != 'u' and len(mods) > 1 and mods[1].split(':')[1:] == ['3']:
+                    continue
                 if fin == 'u' or (fin == '~' and mods[0] == '27'):
-                    code = mods[-1] if fin == '~' else mods[0]
-                    if code == '13':
-                        push('key', 'newline')
+                    code = mods[-1] if fin == '~' else mods[0].split(':')[0]
+                    modifier = mods[1].split(':') if len(mods) > 1 else ['1']
+                    try:
+                        bits = int(modifier[0] or '1') - 1
+                        event = int(modifier[1]) if len(modifier) > 1 else 1
+                        number = int(code)
+                    except ValueError:
+                        continue
+                    if event == 3:
+                        if number == 32: push('key-up', 'space')
+                        elif number in (57442, 57448): push('key-up', 'control')
+                        continue
+                    kind = 'key-repeat' if event == 2 else 'key'
+                    if number == 32 and bits & 4:
+                        push(kind, 'ctrl-space')
+                    elif number in (9, 13, 27, 127):
+                        name = {9:'shift-tab' if bits & 1 else 'tab', 13:'newline' if bits else 'enter', 27:'esc', 127:'backspace'}[number]
+                        push(kind, name)
+                    elif bits & 2 and number in (98, 102, 127):
+                        push(kind, {98:'word-left', 102:'word-right', 127:'kill-word'}[number])
+                    elif bits & 4 and 97 <= number <= 122:
+                        control = CONTROL.get(chr(number - 96))
+                        if control: push(kind, control)
+                    elif 32 <= number < 0xD800 or 0xDFFF < number < 0xE000 or 0xF900 <= number <= 0x10FFFF:
+                        if not bits & (4 | 2):
+                            char = chr(number)
+                            push('text', char.upper() if bits & 1 else char)
                     continue
                 if fin == '~':
                     if mods[0] in CSI_TILDE: push('key', CSI_TILDE[mods[0]])
                     continue
                 name = CSI_FINAL.get(fin)
                 if name:
-                    if len(mods) > 1 and mods[1] in ('3', '5') and name in ('left', 'right'):
+                    if len(mods) > 1 and mods[1].split(':')[0] in ('3', '5') and name in ('left', 'right'):
                         name = 'word-' + name
                     push('key', name)
                 continue
@@ -605,6 +634,8 @@ class Screen:
         self.recorder = Recorder()
         self.heard = queue.Queue()
         self.transcribing = False
+        self.voice_held = False
+        self.key_releases = False
         self.resized = False
         self.tick = 0
         self.leave = None
@@ -620,14 +651,16 @@ class Screen:
         signal.signal(signal.SIGWINCH, lambda *_: setattr(self, 'resized', True))
         cols, rows = self.size()
         # Push what the shell showed into scrollback: the box starts at the bottom.
-        self.write('\x1b[?2004h' + '\r\n' * (rows - 1))
+        self.write('\x1b[>11u\x1b[?u\x1b[?2004h' + '\r\n' * (rows - 1))
         self.draw()
         self.header()
         return self
 
     def __exit__(self, *exc):
+        if self.recorder.process:
+            self.recorder.stop()
         self.clear_live()
-        self.write('\x1b[?2004l\x1b[?25h' + RESET)
+        self.write('\x1b[<u\x1b[?2004l\x1b[?25h' + RESET)
         if self.saved:
             termios.tcsetattr(self.fd_in, termios.TCSADRAIN, self.saved)
         signal.signal(signal.SIGWINCH, signal.SIG_DFL)
@@ -827,7 +860,7 @@ class Screen:
         left = []
         if self.recorder.process:
             secs = self.recorder.seconds()
-            left.append(f'{RED}● REC {secs // 60}:{secs % 60:02d}{RESET} {GRAY}ctrl+r to stop{RESET}')
+            left.append(f'{RED}● REC {secs // 60}:{secs % 60:02d}{RESET} {GRAY}release ctrl+space to stop{RESET}')
         elif self.transcribing:
             left.append(f'{YELLOW}transcribing…{RESET}')
         if self.flash and time.monotonic() < self.flash_until:
@@ -879,6 +912,25 @@ class Screen:
 
     # Keys
     def handle(self, kind, value):
+        if kind == 'keyboard':
+            try: self.key_releases = int(value) & 2 != 0
+            except ValueError: pass
+            return
+        if kind == 'key-up':
+            if value in ('space', 'control') and self.voice_held:
+                self.voice_held = False
+                if self.recorder.process: self.voice()
+            return
+        if kind == 'key-repeat':
+            if value == 'ctrl-space': return
+            kind = 'key'
+        if kind == 'key' and value == 'ctrl-space':
+            if not self.key_releases:
+                self.notice('Hold-to-record needs key releases; open Mike in an updated console or Kitty terminal')
+            elif not self.voice_held and not self.transcribing:
+                self.voice_held = True
+                self.voice()
+            return
         e = self.editor
         cols, _ = self.size()
         width = cols - 3
@@ -995,8 +1047,6 @@ class Screen:
                     self.notice(f'Image #{n} attached')
                 else:
                     e.insert(safe(got[1].replace('\r\n', '\n').replace('\t', '    ')))
-        elif value == 'ctrl-r':
-            self.voice()
 
     def clear_screen(self):
         self.write('\x1b[2J\x1b[3J\x1b[H')

@@ -65,9 +65,13 @@ lists. While Mike works a spinner says what it is doing and for how long.
 - **Ctrl+V** pastes a clipboard image (wl-paste or xclip) as `[Image #1]`;
   a pasted image path does the same. Mike cannot take images yet
   (my-euglena-apps ticket 185), so sending one is refused and says so.
-- **Ctrl+R** records your voice (pw-record, parecord or arecord; a minute at
-  most) with a red `● REC 0:03` in the footer; Ctrl+R again stops, Mike
-  transcribes it and the words land in the box to edit before sending.
+- **Ctrl+Space** records while held; releasing Space or Control stops and
+  transcribes into the draft. Repeated key events do not toggle recording.
+  The footer shows `● REC`; the microphone closes on focus loss/exit and after
+  at most one minute. This needs terminal key-release reporting (the updated
+  codelovesme console/IDE, or Kitty keyboard protocol support). An older
+  terminal shows a clear message rather than guessing when the key was released.
+
 - A message sent while Mike is still on one waits its turn (ten at most,
   shown above the box) and goes when that turn ends; `/unqueue` takes them
   back unsent.

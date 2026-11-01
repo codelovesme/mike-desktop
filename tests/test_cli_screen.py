@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'client'))
@@ -69,6 +70,18 @@ class KeysTest(unittest.TestCase):
         self.assertEqual(rest, '')
         self.assertEqual(events, [('text', 'hi'), ('key', 'enter'), ('key', 'up'), ('key', 'newline'),
                                   ('key', 'newline'), ('key', 'newline'), ('key', 'backspace'), ('key', 'ctrl-v')])
+
+    def test_push_to_talk_events_and_fragmented_release(self):
+        data = '\x1b[?11u\x1b[32;5u\x1b[32;5:2u\x1b[32;1:3u\x1b[57442;1:3u'
+        events, rest = parse_keys(data)
+        self.assertEqual(rest, '')
+        self.assertEqual(events, [('keyboard', '11'), ('key', 'ctrl-space'),
+            ('key-repeat', 'ctrl-space'), ('key-up', 'space'), ('key-up', 'control')])
+        events, rest = parse_keys('\x1b[32;5:')
+        self.assertEqual(events, [])
+        self.assertEqual(parse_keys(rest+'3u')[0], [('key-up', 'space')])
+        self.assertEqual(parse_keys('\x1b[97;1u\x1b[97;1:3u')[0], [('text', 'a')])
+        self.assertEqual(parse_keys('\x1b[1;1:3A')[0], [])
 
     def test_paste_keeps_newlines_and_waits_for_its_end(self):
         events, rest = parse_keys('\x1b[200~a\rb')
@@ -153,6 +166,38 @@ class ScreenTest(unittest.TestCase):
         s.handle('text', '2')
         s.handle('key', 'enter')
         self.assertEqual(t.lines, ['/no ' + 'q' * 12])
+
+    def test_hold_release_records_once_and_preserves_the_draft(self):
+        for released in ('space', 'control'):
+            s = self.make()
+            s.handle('keyboard', '11')
+            s.editor.set('draft ')
+            recorder = Mock(process=None)
+            def start(): recorder.process = object(); return True
+            def stop(): recorder.process = None; return b'RIFF'
+            recorder.start.side_effect = start
+            recorder.stop.side_effect = stop
+            s.recorder = recorder
+            with patch.object(screen.Recorder, 'available', return_value=True):
+                s.handle('key', 'ctrl-space')
+                s.handle('key-repeat', 'ctrl-space')
+                s.handle('key', 'ctrl-space')
+                self.assertEqual(recorder.start.call_count, 1)
+                recorder.stop.assert_not_called()
+                self.assertEqual(s.editor.text, 'draft ')
+                s.handle('key-up', released)
+                kind, words = s.heard.get(timeout=2)
+                self.assertEqual(kind, 'text')
+                self.assertIn('hello', words)
+                s.handle('key-up', 'space')
+                self.assertEqual(recorder.stop.call_count, 1)
+
+    def test_no_release_support_does_not_open_the_microphone(self):
+        s = self.make()
+        with patch.object(s.recorder, 'start') as start:
+            s.handle('key', 'ctrl-space')
+            start.assert_not_called()
+        self.assertIn('key releases', s.flash)
 
     def test_no_recorder_says_so(self):
         s = self.make()
