@@ -8,16 +8,14 @@ import getpass
 import json
 import os
 from pathlib import Path
-import queue
+import shlex
 import sys
-import threading
 import time
 import unicodedata
 
 from mike_service import MikeService, ServiceError, ServiceUnavailable
 import sign_in
 
-PROMPT = 'mike> '
 # How many messages may wait while Mike works on one.
 QUEUE_MOST = 10
 
@@ -34,61 +32,9 @@ def history_path():
     return Path(base) / 'mike-cli' / 'history'
 
 
-class Prompt:
-    """The line being typed, read by readline in a thread of its own: a caret
-    that moves, line editing, ↑/↓ through earlier messages (kept between
-    runs). What Mike says is printed above it, and the line comes back as it
-    was."""
-
-    def __init__(self, output=sys.stdout, history=None):
-        import readline
-        self.readline, self.output, self.history = readline, output, history
-        self.lines = queue.Queue()
-        if history:
-            try:
-                readline.read_history_file(str(history))
-            except OSError:
-                pass
-        readline.set_history_length(500)
-        self.thread = threading.Thread(target=self.read, daemon=True)
-
-    def start(self):
-        self.thread.start()
-
-    def read(self):
-        while True:
-            try:
-                line = input(PROMPT)
-            except (EOFError, OSError, ValueError):
-                self.lines.put(None)
-                return
-            self.lines.put(line)
-
-    def above(self, text):
-        typed = self.readline.get_line_buffer()
-        self.output.write('\r\033[K' + text + '\n' + PROMPT + typed)
-        self.output.flush()
-
-    def get(self, timeout):
-        """The next line typed; None at end of input; '' when none came in time."""
-        try:
-            line = self.lines.get(timeout=timeout)
-        except queue.Empty:
-            return ''
-        return None if line is None else line + '\n'
-
-    def save(self):
-        if not self.history:
-            return
-        try:
-            self.history.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            self.readline.write_history_file(str(self.history))
-            os.chmod(self.history, 0o600)
-        except OSError:
-            pass
-
-
 class Terminal:
+    Unavailable = ServiceUnavailable
+
     def __init__(self, service, workspace, interactive, output=sys.stdout):
         self.service, self.workspace, self.interactive, self.output = service, workspace, interactive, output
         self.owner = ''
@@ -98,14 +44,24 @@ class Terminal:
         self.shown = set()
         self.steps = 0
         self.finished = False
-        self.prompt = None
+        self.prompt = None     # the full-screen chat, when there is one
         self.waiting = []
+        self.status = {}       # the service's last state
+        self.device = '?'
+        self.started = 0.0     # when this turn began
+        self.defer = False     # the screen shows the header itself
+
+    def emit(self, kind, legacy, pretty=None, data=None):
+        """legacy: the plain line printed without the screen; the screen
+        shows kind (you, mike, step, ask, request, answer, error, done,
+        note) with pretty (default legacy)."""
+        if self.prompt:
+            self.prompt.block(kind, plain(legacy if pretty is None else pretty), data)
+        elif legacy is not None:
+            print(plain(legacy), file=self.output, flush=True)
 
     def show(self, text):
-        if self.prompt:
-            self.prompt.above(plain(text))
-        else:
-            print(plain(text), file=self.output, flush=True)
+        self.emit('note', text)
 
     def attach(self, token=None):
         state = self.service.attach(token, connect='auto' if token else 'none')
@@ -116,6 +72,12 @@ class Terminal:
         if state.get('chat_version') != 1:
             raise ServiceError(426, {'error':'chat_incompatible', 'message':'upgrade mike-service to one supporting CLI chat version 1'})
         self.owner = state['account']
+        self.device, self.status = str(state.get('device_id', '?')), state
+        if self.prompt:
+            self.show('Reconnected to the Mike service.')
+            return state
+        if self.defer:
+            return state
         self.show(f"Mike: {self.owner}; local device {state.get('device_id', '?')}; project {self.workspace}")
         self.show('Project context grants no tool permission. /help lists commands.')
         return state
@@ -124,6 +86,7 @@ class Terminal:
         view = self.service.call('/v1/chat/resume', {'turn_id':turn})
         self.turn, self.view, self.local = turn, {}, None
         self.steps, self.finished, self.shown = 0, False, set()
+        self.started = time.monotonic()
         self.render(view)
 
     def ask(self, text):
@@ -132,22 +95,28 @@ class Terminal:
         if self.turn and not self.finished:
             if self.interactive and len(self.waiting) < QUEUE_MOST:
                 self.waiting.append(text)
+                if self.prompt: return
                 self.show(f'Queued ({len(self.waiting)} waiting): it goes when this turn ends. /unqueue takes them back.')
                 return
             self.show('A turn is still active. /leave detaches from it; /stop stops only its current local command.')
             return
         if len(text.encode()) > 16384:
             raise ValueError('message exceeds 16 KiB')
+        if self.prompt: self.emit('you', None, text)
         # Never retry this POST: a lost reply may already have started a turn.
         self.turn = self.service.call('/v1/chat/ask', {'text':text, 'workspace':self.workspace})['turn_id']
         self.steps, self.finished, self.shown, self.view = 0, False, set(), {}
-        self.show(f'Turn {self.turn} (resume with --resume {self.turn})')
+        self.started = time.monotonic()
+        if not self.prompt: self.show(f'Turn {self.turn} (resume with --resume {self.turn})')
 
     def render(self, view):
         if view.get('turn_id') != self.turn:
             raise ValueError('service returned another turn')
         self.view = view
         for step in view.get('steps', [])[self.steps:]:
+            if self.prompt:
+                self.emit('step', None, '', data=step)
+                continue
             self.show(f"{step.get('app', '')}: {step.get('say', '')} [{step.get('class', '')}]")
             result = step.get('result')
             if isinstance(result, dict):
@@ -158,13 +127,17 @@ class Terminal:
         nonce = view.get('confirmation_id')
         if view.get('stage') == 'confirm' and nonce and nonce not in self.shown:
             self.shown.add(nonce)
-            self.show(f"Question: {view.get('say', '')}\n/yes {nonce[:12]} or /no {nonce[:12]}")
+            self.emit('ask', f"Question: {view.get('say', '')}\n/yes {nonce[:12]} or /no {nonce[:12]}", view.get('say', ''))
         if view.get('stage') in ('done', 'failed') and not self.finished:
-            self.show(view.get('reply', '') or view['stage'])
+            reply = view.get('reply', '') or view['stage']
+            self.emit('mike' if view['stage'] == 'done' else 'error', reply)
             self.finished = True
+            if self.prompt and self.started:
+                self.emit('done', None, f'Worked for {int(time.monotonic() - self.started)}s')
 
     def poll(self):
         state = self.service.state()  # heartbeat this client even while typing
+        self.status = state
         if state.get('account') != self.owner:
             raise ServiceError(409, {'error':'account_changed', 'message':'account changed; start a new CLI session'})
         if self.turn and not self.finished:
@@ -176,7 +149,12 @@ class Terminal:
             key = work['approval_id']
             if key not in self.shown:
                 self.shown.add(key)
-                self.show(f"Local request {work['id']} in {work.get('cwd') or self.workspace}:\n{json.dumps(work.get('argv') or work.get('file') or work.get('goal'))}")
+                what = work.get('argv') or work.get('file') or work.get('goal')
+                if self.prompt:
+                    shown = shlex.join(what) if isinstance(what, list) and all(isinstance(x, str) for x in what) else json.dumps(what)
+                    self.emit('request', None, f"{shown}  (in {work.get('cwd') or self.workspace})")
+                    return None
+                self.show(f"Local request {work['id']} in {work.get('cwd') or self.workspace}:\n{json.dumps(what)}")
                 if work['kind'] == 'file' and work['stage'] == 'awaiting_approval':
                     self.show(f'/find {key[:12]} QUERY searches only the current project; /decline {key[:12]} refuses.')
                 else:
@@ -188,6 +166,26 @@ class Terminal:
             self.finished, self.turn = False, ''
             self.ask(self.waiting.pop(0))
         return None
+
+    def running(self):
+        """This turn's local command is running (so it can be stopped)."""
+        work = self.status.get('work') or {}
+        return bool(self.turn) and work.get('id') == self.view.get('work_id') and work.get('stage') == 'running'
+
+    def doing(self):
+        """What Mike is doing now, in a few words."""
+        work = self.status.get('work') or {}
+        if self.running():
+            what = work.get('argv')
+            if isinstance(what, list):
+                return 'Running ' + ' '.join(str(x) for x in what)[:60]
+            return 'Working on this computer'
+        steps = self.view.get('steps') or []
+        if self.view.get('say') and self.view.get('stage') not in ('confirm', 'done', 'failed'):
+            return 'Mike: ' + str(self.view['say'])[:60]
+        if steps:
+            return 'Mike: ' + str(steps[-1].get('say', ''))[:60]
+        return 'Mike is thinking'
 
     @staticmethod
     def matches(given, nonce):
@@ -220,6 +218,7 @@ class Terminal:
                 return
             self.view = {}  # consume before sending, including on a lost reply
             self.service.call('/v1/chat/confirm', {'turn_id':self.turn, 'yes':verb == '/yes', 'confirmation_id':nonce})
+            if self.prompt: self.emit('answer', None, 'You said ' + verb[1:])
         elif verb in ('/approve', '/decline', '/find'):
             given, _, query = arg.partition(' ')
             work = self.local
@@ -234,6 +233,8 @@ class Terminal:
             self.service.claim(work['approval_id'])
             fields = {'folder':self.workspace, 'query':query} if verb == '/find' else {}
             self.service.answer(work['approval_id'], 'decline' if verb == '/decline' else 'approve', **fields)
+            if self.prompt:
+                self.emit('answer', None, {'/approve':'You allowed it', '/decline':'You refused it'}.get(verb, 'Searching this project for ' + query.strip()))
         elif verb == '/stop':
             work = self.service.state().get('work')
             if not work or work.get('id') != self.view.get('work_id') or work.get('stage') != 'running':
@@ -241,6 +242,15 @@ class Terminal:
                 return
             self.service.stop(work['id'])
             self.show('Stop requested for this command; waiting for its actual result. This does not cancel future model steps.')
+        elif verb == '/status':
+            self.show(f"Signed in as {self.owner}; this computer {self.device}\n"
+                      f"Project {self.workspace} (context only, no permission)\n"
+                      f"Service: {self.status.get('connection', '?')}; turn {self.turn or 'none'}"
+                      f"{' (finished)' if self.turn and self.finished else ''}; {len(self.waiting)} queued")
+        elif verb == '/help' and self.prompt:
+            from screen import COMMANDS, SHORTCUTS
+            self.show('\n'.join(f"{name} {args}".strip().ljust(18) + what for name, args, what in COMMANDS)
+                      + '\n\n' + '\n'.join(k.ljust(30) + v for k, v in SHORTCUTS))
         elif verb == '/help':
             self.show('/yes ID, /no ID: answer the displayed question; /approve ID, /decline ID: local decision\n/find ID QUERY: file search in this project; /stop: current local command only\n/resume TURN, /leave, /new, /unqueue, /quit. Enter alone never approves; a message typed while Mike works waits its turn.\n↑/↓ earlier messages. Ctrl-C or Ctrl-D detaches; the service stays alive.\nAccount: mike-cli --account, --sign-in, --switch-account, --sign-out.')
         else:
@@ -325,7 +335,7 @@ def main(argv=None):
     if args.connect and not interactive: parser.error('--connect needs a terminal; use --token-stdin with protected input')
     service = MikeService('cli', approvals=interactive)
     terminal = Terminal(service, str(workspace), interactive)
-    prompt = None
+    terminal.defer = interactive
     try:
         token = getpass.getpass('Account session token (not saved): ') if args.connect else None
         if args.token_stdin: token = sys.stdin.readline(65537).strip()
@@ -353,16 +363,24 @@ def main(argv=None):
             terminal.attach()
         token = None
         once = args.ask is not None or bool(args.resume) or not interactive
+        if interactive:
+            from screen import Screen
+            screen = Screen(terminal, history_path())
+            with screen:
+                terminal.prompt = screen
+                if args.resume: terminal.resume(args.resume)
+                elif args.ask is not None: terminal.ask(args.ask)
+                result = screen.loop(args.wait, once)
+                terminal.prompt = None
+            if result == 130:
+                print(f'Detached; service and accepted work continue. Turn: {terminal.turn or "none"}', flush=True)
+            return result
         if args.resume: terminal.resume(args.resume)
         elif args.ask is not None: terminal.ask(args.ask)
-        elif not interactive:
+        else:
             text = sys.stdin.read(16385)
             if not text.strip(): return 0
             terminal.ask(text)
-        if interactive:
-            prompt = Prompt(sys.stdout, history_path())
-            terminal.prompt = prompt
-            prompt.start()
         deadline = time.monotonic() + args.wait
         while True:
             try:
@@ -373,24 +391,11 @@ def main(argv=None):
                 if terminal.turn: terminal.resume(terminal.turn)
                 result = None
             if result is not None: return result
-            if once and terminal.finished: return 0 if terminal.view.get('stage') == 'done' else 1
+            if terminal.finished: return 0 if terminal.view.get('stage') == 'done' else 1
             if terminal.turn and not terminal.finished and time.monotonic() > deadline:
                 terminal.show(f'Timed out waiting; turn {terminal.turn} may still be active. Use --resume; no request was replayed.')
                 return 4
-            if not interactive:
-                time.sleep(1)
-                continue
-            line = prompt.get(1)
-            if line is None:
-                terminal.prompt = None
-                print('', flush=True)
-                return 0
-            if line:
-                try:
-                    if terminal.command(line.rstrip('\n')) == 'quit': return 0
-                except ValueError as error:
-                    terminal.show(str(error))
-                deadline = time.monotonic() + args.wait
+            time.sleep(1)
     except KeyboardInterrupt:
         terminal.prompt = None
         print('', flush=True)
@@ -405,7 +410,7 @@ def main(argv=None):
         print('mike-cli: ' + plain(error) + '; start the shared service with mike-service start (or mike-cli --sign-in). Requests are not retried.', file=sys.stderr)
         return 4
     finally:
-        if prompt: prompt.save()
+        terminal.prompt = None
         service.detach()
 
 

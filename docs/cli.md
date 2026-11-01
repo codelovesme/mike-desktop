@@ -45,14 +45,43 @@ mike-cli --resume TURN_ID         # explicit central-turn continuation
 printf 'What can you do?' | mike-cli
 ```
 
-## The prompt
+## The screen
 
-`mike> ` is a line editor (readline): the caret moves, ↑/↓ go through
-earlier messages, kept between runs in `$XDG_STATE_HOME/mike-cli/history`
-(0600). What Mike says is printed above the line being typed, which comes
-back as it was. A message sent while Mike is still on one waits its turn
-(ten at most, `Queued (n waiting)`) and goes when that turn ends; `/unqueue`
-takes them back unsent. Ctrl-D, like Ctrl-C, detaches.
+In a terminal `mike-cli` is a full-screen chat, like `claude` or `codex`.
+The input box sits at the bottom between two rules, with a footer under it
+(account, project, queue, and model / thinking / mode once the service
+reports them). The conversation scrolls above it into the terminal's own
+scrollback, as **You** and **Mike** blocks; Mike's steps and their output
+are indented lines, replies show headings, **bold**, `code`, code blocks and
+lists. While Mike works a spinner says what it is doing and for how long.
+
+- **Enter** sends; **Alt+Enter**, **Ctrl+J** or `\` then Enter add a line
+  (Shift+Enter too where the terminal reports it). Pasted text stays as
+  pasted. ←/→, Home/End, Ctrl+A/E/U/K/W edit; ↑/↓ move between lines, then
+  through earlier messages, kept between runs in
+  `$XDG_STATE_HOME/mike-cli/history` (0600).
+- **`/`** opens the command list, filtered as you type; ↑/↓ choose, Tab
+  completes, Enter runs. **`?`** on an empty box lists the shortcuts.
+- **Ctrl+V** pastes a clipboard image (wl-paste or xclip) as `[Image #1]`;
+  a pasted image path does the same. Mike cannot take images yet
+  (my-euglena-apps ticket 185), so sending one is refused and says so.
+- **Ctrl+R** records your voice (pw-record, parecord or arecord; a minute at
+  most) with a red `● REC 0:03` in the footer; Ctrl+R again stops, Mike
+  transcribes it and the words land in the box to edit before sending.
+- A message sent while Mike is still on one waits its turn (ten at most,
+  shown above the box) and goes when that turn ends; `/unqueue` takes them
+  back unsent.
+- **Esc** closes the menu, or stops the command Mike runs on this computer.
+  **Ctrl+C** clears the box; twice on an empty box detaches. **Ctrl+D**
+  detaches. Detaching never stops the service or Mike's accepted work.
+- `/clear` clears the screen only (Mike keeps the conversation); `/status`
+  says who, which computer, which project and turn.
+
+A question from Mike, or a request to run something on this computer, shows
+in a box above the input with the command in full and numbered choices.
+Nothing is chosen until you pick one with ↑/↓ or its number, so Enter alone
+never answers. `--ask`, `--resume` without a terminal, and piped input print
+plain lines as before.
 
 ## Conversations
 
