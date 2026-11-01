@@ -65,12 +65,25 @@ lists. While Mike works a spinner says what it is doing and for how long.
 - **Ctrl+V** pastes a clipboard image (wl-paste or xclip) as `[Image #1]`;
   a pasted image path does the same. Mike cannot take images yet
   (my-euglena-apps ticket 185), so sending one is refused and says so.
-- **Ctrl+Space** records while held; releasing Space or Control stops and
-  transcribes into the draft. Repeated key events do not toggle recording.
-  The footer shows `● REC`; the microphone closes on focus loss/exit and after
-  at most one minute. This needs terminal key-release reporting (the updated
-  codelovesme console/IDE, or Kitty keyboard protocol support). An older
-  terminal shows a clear message rather than guessing when the key was released.
+- **Hold Ctrl+Space**: record immediately; release after holding to transcribe
+  into the draft. Enter sends only after the transcript is ready.
+- **Tap Ctrl+Space** (under 350 ms): keep recording after release. Ctrl+Space
+  again, bare Space or Enter stops and transcribes; that stopping key never
+  sends the message. Both recording modes keep the one-minute capture bound.
+- **Ctrl+Shift+Space**: spoken conversation on/off. Mike listens until you pause,
+  sends that utterance, performs work through the existing approval flow, speaks
+  the result, then listens again. **Ctrl+Space also turns conversation off.**
+  Thirty seconds without speech ends listening automatically. The microphone is
+  closed during transcription, model work and playback. Spoken yes/evet or
+  no/hayır applies only to the exact displayed approval; other words never
+  silently approve a command. Existing draft text/images are not auto-submitted.
+  Finish an existing manual capture before starting conversation.
+
+These shortcuts require the updated Console/IDE (open a new window) or a
+terminal advertising Kitty key-release support. Conversation also needs the
+updated Mike service and a local recorder/player (PipeWire, PulseAudio or ALSA).
+Closing the window or leaving the CLI closes capture/playback; stopping
+conversation never stops or approves a running tool command.
 
 - A message sent while Mike is still on one waits its turn (ten at most,
   shown above the box) and goes when that turn ends; `/unqueue` takes them

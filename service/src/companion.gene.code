@@ -43,6 +43,7 @@ decided = []
 recovery = null
 device_refused = false
 sessions = []
+readings = []
 turns = []
 session_serial = 0
 | Headless (ticket 160): a server enrolled with a code the person confirmed
@@ -484,6 +485,7 @@ ClearAccount =>
 EndGeneration { reason, detail, can_report } =>
     emit AbandonWork { detail = detail, can_report = can_report } to this
     generation += 1
+    readings = []
     ended_reason = reason
     activity = []
     decided = []
@@ -1028,6 +1030,12 @@ Route { method, path, body, headers } =>
     if path = "/v1/chat/hear"
         emit ChatHear { request = request } to this get heard
         return heard
+    if path = "/v1/chat/read"
+        emit ChatRead { session = session, request = request } to this get reading
+        return reading
+    if path = "/v1/chat/spoken"
+        emit ChatSpoken { session = session, request = request } to this get spoken
+        return spoken
     if path = "/v1/chat/resume"
         emit ChatResume { session = session, request = request } to this get resumed
         return resumed
@@ -1192,6 +1200,7 @@ StateFor { session } =>
         device_id = device_id
         editor_version = 1
         chat_version = 2
+        voice_chat = true
         model = session.model
         thinking = session.thinking
         mode = session.mode
@@ -1433,6 +1442,48 @@ ChatHear { request } =>
         emit Fail { status = 503, error = "mike_unavailable", message = "Mike could not make out the recording" } to this get unavailable
         return unavailable
     return Answer { status = 200, value = { text = heard.text } }
+
+| Speech uses the same account-authenticated central API as the browser.
+| Reading receipts belong to the requesting local session and generation.
+ChatRead { session, request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get denied
+        return denied
+    if request.text ∉ String or request.text = ""
+        emit Fail { status = 400, error = "bad_request", message = "text is required" } to this get empty
+        return empty
+    emit Length { value = request.text } to core get size
+    if size.value > 16384
+        emit Fail { status = 413, error = "too_large", message = "speech text exceeds 16 KiB" } to this get long
+        return long
+    started_generation = generation
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Read { text = request.text } } } to this get reading
+    if generation ≠ started_generation or reading ∉ Speaking or reading.reading_id ∉ String
+        emit Fail { status = 503, error = "speech_unavailable", message = "Mike could not start speech" } to this get failed
+        return failed
+    readings += [{ id = reading.reading_id, session = session.id, generation = generation }]
+    emit Length { value = readings } to core get many
+    if many.value > 64, readings = readings[many.value - 64, length)
+    return Answer { status = 200, value = { reading_id = reading.reading_id } }
+
+ChatSpoken { session, request } =>
+    owned = false
+    loop reading over readings
+        if reading.id = request.reading_id and reading.session = session.id and reading.generation = generation, owned = true
+    if not owned or account_token = ""
+        emit Fail { status = 403, error = "not_owned", message = "that reading belongs to another session" } to this get denied
+        return denied
+    started_generation = generation
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Spoken { reading_id = request.reading_id } } } to this get speech
+    if generation ≠ started_generation or speech ∉ Speech
+        emit Fail { status = 503, error = "speech_unavailable", message = "Mike's speech is unavailable" } to this get failed
+        return failed
+    if speech.stage ≠ "speaking"
+        keep = []
+        loop reading over readings
+            if reading.id ≠ request.reading_id, keep += [reading]
+        readings = keep
+    return Answer { status = 200, value = { stage = speech.stage, audio_base64 = speech.audio_base64, format = speech.format, reason = speech.reason } }
 
 | Session bindings are a bounded working set, not another chat database.
 RememberChat { turn_id, session, editor } =>

@@ -413,6 +413,20 @@ emit Reply { body = "{\"_class\":\"Failed\",\"reason\":\"I could not make out th
 emit Call { method = "POST", path = "/v1/chat/hear", body = "{\"audio_base64\":\"UklGRg==\",\"format\":\"webm\"}", bearer = asker_token, extra = {} } to this get not_made_out
 assert not_made_out.status = 503 and not_made_out.value.error = "mike_unavailable"
 
+| A speech receipt is session-bound, and ready audio is delivered once.
+emit Reply { body = "{\"_class\":\"Speaking\",\"reading_id\":\"read-1\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/read", body = "{\"text\":\"Hello\"}", bearer = asker_token, extra = {} } to this get reading
+assert reading.status = 200 and reading.value.reading_id = "read-1"
+emit LastPost to this get read_post
+assert read_post.value.particle._class = "Read" and read_post.value.particle.text = "Hello"
+emit Call { method = "POST", path = "/v1/chat/spoken", body = "{\"reading_id\":\"read-1\"}", bearer = watch, extra = {} } to this get foreign_speech
+assert foreign_speech.status = 403
+emit Reply { body = "{\"_class\":\"Speech\",\"stage\":\"ready\",\"audio_base64\":\"UklGRg==\",\"format\":\"wav\",\"reason\":\"\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/spoken", body = "{\"reading_id\":\"read-1\"}", bearer = asker_token, extra = {} } to this get speech
+assert speech.status = 200 and speech.value.stage = "ready" and speech.value.audio_base64 = "UklGRg=="
+emit Call { method = "POST", path = "/v1/chat/spoken", body = "{\"reading_id\":\"read-1\"}", bearer = asker_token, extra = {} } to this get replayed_speech
+assert replayed_speech.status = 403
+
 | ---- Account change: the old owner's running command is stopped and
 | reported with the old owner's credentials; every session must re-attach ----
 

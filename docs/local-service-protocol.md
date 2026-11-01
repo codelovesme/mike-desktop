@@ -425,3 +425,18 @@ and final reply text is still delivered whole. Account generation, turn/session
 ownership, confirmation nonces and local grant/approval rules are unchanged.
 The CLI may retain next-message preferences; accepted turns keep their original
 choices across settings changes and explicit resume.
+
+### Spoken conversation (ticket 189)
+
+State advertises `voice_chat: true` when the service provides authenticated
+`POST /v1/chat/read {text}` → `{reading_id}` and
+`POST /v1/chat/spoken {reading_id}` → `{stage,audio_base64,format,reason}`.
+The first starts the central Read API; the second polls Spoken. Each receipt
+is bound to the local session and account generation, and ready/failed output
+is delivered once. Existing bearer/protocol/origin checks apply. No device
+credential or account token reaches the CLI. Speech text is bounded to 16 KiB;
+only the spoken response route permits a larger bounded audio response.
+
+CLI capture/playback workers carry an epoch. Manual cancellation, account
+change, failure and exit cannot replay a request or let a stale callback send
+a new message/reopen the microphone. No audio is stored in conversation history.

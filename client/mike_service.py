@@ -118,7 +118,10 @@ class MikeService:
         )
         try:
             with urlopen(request, timeout=timeout) as response:
-                return json.loads(response.read(1 << 20) or b"{}")
+                limit = 44*1024*1024 if path == "/v1/chat/spoken" else 1 << 20
+                data = response.read(limit+1)
+                if len(data)>limit:raise ValueError("local service response exceeds limit")
+                return json.loads(data or b"{}")
         except HTTPError as error:
             try:
                 answer = json.loads(error.read(1 << 16) or b"{}")

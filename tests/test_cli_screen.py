@@ -185,10 +185,13 @@ class ScreenTest(unittest.TestCase):
                 self.assertEqual(recorder.start.call_count, 1)
                 recorder.stop.assert_not_called()
                 self.assertEqual(s.editor.text, 'draft ')
+                s.voice_pressed -= 1
                 s.handle('key-up', released)
-                kind, words = s.heard.get(timeout=2)
-                self.assertEqual(kind, 'text')
-                self.assertIn('hello', words)
+                kind, payload = s.heard.get(timeout=2)
+                self.assertEqual(kind, 'transcript')
+                self.assertIn('hello', payload['text'])
+                s.audio_event(kind,payload)
+                self.assertIn('draft hello', s.editor.text)
                 s.handle('key-up', 'space')
                 self.assertEqual(recorder.stop.call_count, 1)
 

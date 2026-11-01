@@ -41,11 +41,12 @@ answers need Mike itself: see my-euglena-apps ticket 185.
   Enter or 1/2 (`Yes` / `No`; for a file request: search this project for…
   / decline). Enter alone never approves without a visible selection.
   Typed `/yes ID` … keep working.
-- **Voice (updated by workspace ticket 188).** Hold Ctrl+Space to record
-  (PipeWire, PulseAudio or ALSA). Releasing Space or Control stops; the words
-  land in the draft after transcription. Repeats do not toggle recording.
-  The microphone closes on focus loss/exit and after at most one minute.
-  Needs a terminal with release events; no recorder → a clear message.
+- **Voice (workspace ticket 189).** Hold Ctrl+Space for one capture; tap it
+  for latched capture, stopped by Space, Enter or Ctrl+Space. Both transcribe
+  into the draft for a separate send. Ctrl+Shift+Space opens spoken conversation;
+  either shortcut closes it. Conversation pauses capture during work/playback,
+  resumes after spoken replies and closes after 30 seconds without speech.
+
 - **Footer.** Account, project folder, queue size, and `? for shortcuts`;
   model, thinking level and mode appear here as soon as the service
   reports them (185).

@@ -24,6 +24,8 @@ import time
 import tty
 import unicodedata
 
+from voice_audio import Detector, Player, TAP_SECONDS, IDLE_SECONDS
+
 # ── Colours ─────────────────────────────────────────────────────────────
 RESET = '\x1b[0m'
 BOLD = '\x1b[1m'
@@ -70,7 +72,8 @@ SHORTCUTS = [
     ('/', 'commands'),
     ('↑ ↓', 'move between lines, then earlier messages'),
     ('ctrl+v', 'paste an image (or text) from the clipboard'),
-    ('ctrl+space', 'hold to record; release to transcribe'),
+    ('ctrl+space', 'hold: record once · tap: keep recording'),
+    ('ctrl+shift+space', 'spoken conversation on/off'),
     ('esc', 'close a menu · stop the running command'),
     ('ctrl+c', 'clear the box · twice to leave'),
     ('ctrl+d', 'leave'),
@@ -464,10 +467,11 @@ def parse_keys(s, final=False):
                     if event == 3:
                         if number == 32: push('key-up', 'space')
                         elif number in (57442, 57448): push('key-up', 'control')
+                        elif number == 27: push('key-up', 'escape')
                         continue
                     kind = 'key-repeat' if event == 2 else 'key'
                     if number == 32 and bits & 4:
-                        push(kind, 'ctrl-space')
+                        push(kind, 'voice-chat' if bits & 1 else 'ctrl-space')
                     elif number in (9, 13, 27, 127):
                         name = {9:'shift-tab' if bits & 1 else 'tab', 13:'newline' if bits else 'enter', 27:'esc', 127:'backspace'}[number]
                         push(kind, name)
@@ -636,6 +640,16 @@ class Screen:
         self.transcribing = False
         self.voice_held = False
         self.key_releases = False
+        self.voice_pressed = 0.0
+        self.record_mode = ''
+        self.audio_epoch = 0
+        self.conversation = False
+        self.conversation_phase = ''
+        self.conversation_last = None
+        self.capture_question = None
+        self.detector = None
+        self.player = Player()
+        self.speech_cancel = threading.Event()
         self.resized = False
         self.tick = 0
         self.leave = None
@@ -657,8 +671,10 @@ class Screen:
         return self
 
     def __exit__(self, *exc):
+        self.stop_conversation(quiet=True)
         if self.recorder.process:
             self.recorder.stop()
+        self.audio_epoch += 1
         self.clear_live()
         self.write('\x1b[<u\x1b[?2004l\x1b[?25h' + RESET)
         if self.saved:
@@ -860,9 +876,13 @@ class Screen:
         left = []
         if self.recorder.process:
             secs = self.recorder.seconds()
-            left.append(f'{RED}● REC {secs // 60}:{secs % 60:02d}{RESET} {GRAY}release ctrl+space to stop{RESET}')
+            hint = 'Space / Enter / ctrl+space to stop' if self.record_mode == 'latched' else 'release after holding · quick tap keeps recording'
+            if self.conversation: hint = 'conversation · pause to send · ctrl+space to end'
+            left.append(f'{RED}● REC {secs // 60}:{secs % 60:02d}{RESET} {GRAY}{hint}{RESET}')
         elif self.transcribing:
             left.append(f'{YELLOW}transcribing…{RESET}')
+        if self.conversation:
+            left.append(f'{ACCENT}voice chat: {self.conversation_phase} · {IDLE_SECONDS}s silence timeout{RESET}')
         if self.flash and time.monotonic() < self.flash_until:
             left.append(f'{YELLOW}{self.flash}{RESET}')
         status = t.status or {}
@@ -917,19 +937,42 @@ class Screen:
             except ValueError: pass
             return
         if kind == 'key-up':
+            if value == 'escape':
+                self.stop_conversation(quiet=True)
+                if self.recorder.process: self.finish_recording(discard=True)
+                return
             if value in ('space', 'control') and self.voice_held:
                 self.voice_held = False
-                if self.recorder.process: self.voice()
+                if self.recorder.process:
+                    if time.monotonic()-self.voice_pressed < TAP_SECONDS:
+                        self.record_mode = 'latched'
+                    else:
+                        self.finish_recording()
             return
         if kind == 'key-repeat':
-            if value == 'ctrl-space': return
+            if value in ('ctrl-space', 'voice-chat'): return
             kind = 'key'
+        if kind == 'key' and value == 'voice-chat':
+            if self.conversation:self.stop_conversation()
+            else:self.start_conversation()
+            return
         if kind == 'key' and value == 'ctrl-space':
-            if not self.key_releases:
-                self.notice('Hold-to-record needs key releases; open Mike in an updated console or Kitty terminal')
+            if self.conversation:
+                self.stop_conversation()
+            elif self.recorder.process and self.record_mode == 'latched':
+                self.finish_recording()
+            elif not self.key_releases:
+                self.notice('Recording shortcuts need key releases; open an updated Console/IDE window')
             elif not self.voice_held and not self.transcribing:
                 self.voice_held = True
-                self.voice()
+                self.voice_pressed = time.monotonic()
+                self.start_recording('pending')
+            return
+        if self.recorder.process and self.record_mode == 'latched' and ((kind == 'key' and value == 'enter') or (kind == 'text' and value == ' ')):
+            self.finish_recording()
+            return
+        if self.transcribing and kind == "key" and value == "enter":
+            self.notice("Wait for transcription before sending")
             return
         e = self.editor
         cols, _ = self.size()
@@ -1056,30 +1099,193 @@ class Screen:
         self.header()
 
     def voice(self):
+        # Kept for the existing recorder diagnostics and duration bound.
+        if self.recorder.process:self.finish_recording()
+        else:self.start_recording('pending')
+
+    def start_recording(self, mode):
         if self.transcribing:
             self.notice('Still transcribing the last recording')
-            return
-        if self.recorder.process:
-            data = self.recorder.stop()
-            if not data:
-                self.notice('Nothing was recorded')
-                return
-            self.transcribing = True
-            threading.Thread(target=self.transcribe, args=(data,), daemon=True).start()
-            return
+            return False
         if not Recorder.available():
             self.notice('No recorder here: install pipewire, pulseaudio-utils or alsa-utils')
-            return
+            return False
         if not self.recorder.start():
             self.notice('Could not start recording')
+            return False
+        self.audio_epoch += 1
+        self.record_mode = mode
+        if mode == 'conversation':
+            self.detector = Detector()
+            q = self.question()
+            self.capture_question = q[0] if q else None
+            self.conversation_phase = 'listening'
+        return True
 
-    def transcribe(self, data):
+    def finish_recording(self, discard=False):
+        if not self.recorder.process:return
+        mode = self.record_mode
+        self.record_mode = ''
+        data = self.recorder.stop()
+        if discard:
+            self.audio_epoch += 1
+            self.voice_held = False
+            return
+        if not data:
+            self.notice('Nothing was recorded')
+            return
+        self.transcribing = True
+        if mode == 'conversation':self.conversation_phase = 'transcribing'
+        threading.Thread(target=self.transcribe,args=(data,self.audio_epoch,mode=='conversation',self.capture_question),daemon=True).start()
+
+    def transcribe(self, data, epoch=None, conversation=False, question=None):
         try:
             answer = self.terminal.service.call('/v1/chat/hear', {
-                'audio_base64': base64.b64encode(data).decode(), 'format': 'wav'}, timeout=45)
-            self.heard.put(('text', str(answer.get('text') or '').strip()))
-        except Exception as error:  # shown, never raised in a thread
-            self.heard.put(('error', 'Could not hear it: ' + str(error)))
+                'audio_base64':base64.b64encode(data).decode(), 'format':'wav'},timeout=45)
+            words = str(answer.get('text') or '').strip()
+            if epoch is None:self.heard.put(('text',words))
+            else:self.heard.put(('transcript',{'epoch':epoch,'conversation':conversation,'question':question,'text':words}))
+        except Exception as error:
+            if epoch is None:self.heard.put(('error','Could not hear it: '+str(error)))
+            else:self.heard.put(('audio-error',{'epoch':epoch,'text':'Could not hear it: '+str(error)}))
+
+    def start_conversation(self):
+        if not self.terminal.status.get("voice_chat"):
+            self.notice("Upgrade Mike service for spoken conversation")
+            return
+        if not self.key_releases:
+            self.notice('Conversation needs key releases; open an updated Console/IDE window')
+            return
+        if self.recorder.process or self.transcribing:
+            self.notice("Finish the current recording/transcript before starting conversation")
+            return
+        if not Recorder.available() or not Player.available():
+            self.notice('Conversation needs a microphone recorder and a local audio player')
+            return
+        self.audio_epoch += 1
+        self.transcribing = False
+        self.conversation = True
+        self.conversation_phase = 'idle'
+        self.conversation_last = ('reply',self.terminal.turn) if self.terminal.finished else None
+        self.speech_cancel = threading.Event()
+        self.notice('Conversation on · ctrl+space or ctrl+shift+space to end')
+
+    def stop_conversation(self, quiet=False):
+        was_on = self.conversation
+        self.conversation = False
+        self.conversation_phase = ''
+        self.speech_cancel.set()
+        self.player.stop()
+        if was_on:
+            if self.recorder.process:self.finish_recording(discard=True)
+            self.audio_epoch += 1
+            self.transcribing = False
+            self.voice_held = False
+            if not quiet:self.notice('Conversation off')
+
+    def request_speech(self, text, identity):
+        self.conversation_last = identity
+        self.conversation_phase = 'speaking'
+        epoch,cancel = self.audio_epoch,self.speech_cancel
+        def speak():
+            try:
+                started = self.terminal.service.call('/v1/chat/read',{'text':safe(text,16384)},timeout=15)
+                end = time.monotonic()+90
+                while not cancel.is_set() and time.monotonic()<end:
+                    sound = self.terminal.service.call('/v1/chat/spoken',{'reading_id':started['reading_id']},timeout=15)
+                    if sound.get('stage')=='ready':
+                        self.heard.put(('speech',{'epoch':epoch,'sound':sound}))
+                        return
+                    if sound.get('stage')!='speaking':raise ValueError(sound.get('reason') or 'speech failed')
+                    cancel.wait(.2)
+                if not cancel.is_set():raise ValueError('speech timed out')
+            except Exception as error:
+                self.heard.put(('audio-error',{'epoch':epoch,'text':'Could not speak: '+str(error)}))
+        threading.Thread(target=speak,daemon=True).start()
+
+    def audio_event(self, kind, payload):
+        if kind in ('text','error'):
+            self.transcribing = False
+            if kind=='text' and payload:self.editor.insert(safe(payload.replace('\n',' ')))
+            elif kind=='error':self.block('error',payload)
+            return
+        if payload['epoch'] != self.audio_epoch:return
+        if kind=='speech':
+            if not self.conversation:return
+            try:self.player.start(payload['sound']['audio_base64'],payload['sound']['format'])
+            except Exception as error:
+                self.stop_conversation();self.block('error',str(error))
+            return
+        self.transcribing = False
+        if kind=='audio-error':
+            self.stop_conversation();self.block('error',payload['text'])
+            return
+        words = safe(payload['text'].replace('\n',' '))
+        if not payload['conversation']:
+            if words:self.editor.insert(words)
+            else:self.notice('Mike heard nothing')
+            return
+        if not self.conversation:return
+        self.conversation_phase = 'idle'
+        if not words:return
+        q = self.question()
+        if payload['question']:
+            if not q or q[0]!=payload['question']:
+                self.stop_conversation();self.notice('The approval question changed; answer it again')
+                return
+            word = words.casefold().strip(' .!?')
+            choice = 0 if word in ('yes','evet') else -1 if word in ('no','hayır','hayir') else None
+            if choice is None or q[3][choice][1].endswith(' '):
+                self.notice('Say yes/evet or no/hayır for this exact question')
+                return
+            self.run(q[3][choice][1],echo=False)
+        elif q:
+            self.stop_conversation();self.notice('An approval arrived; answer the displayed question')
+        else:
+            try:self.terminal.ask(words)
+            except Exception as error:
+                self.stop_conversation();self.block('error',str(error))
+
+    def audio_tick(self, now=None):
+        now = time.monotonic() if now is None else now
+        if self.recorder.process and self.recorder.seconds()>=RECORD_MOST:
+            self.finish_recording()
+        if not self.conversation:return
+        if self.player.process:
+            code = self.player.process.poll()
+            if code is None:return
+            self.player.stop()
+            if code:
+                self.stop_conversation();self.notice('Audio playback failed; conversation stopped')
+                return
+            self.conversation_phase = 'idle'
+        if self.transcribing or self.conversation_phase=='speaking':return
+        t = self.terminal
+        q = self.question()
+        identity = ('question',q[0]) if q else ('reply',t.turn)
+        if self.recorder.process:
+            if self.working() and not q:
+                self.finish_recording(discard=True)
+                self.conversation_phase = 'working'
+                return
+            try:activity = self.detector.inspect(self.recorder.path,now)
+            except Exception as error:
+                self.stop_conversation();self.block('error',str(error));return
+            if activity=='idle':
+                self.stop_conversation();self.notice('Conversation off after 30 seconds without speech')
+            elif activity=='utterance':self.finish_recording()
+            return
+        if q and identity!=self.conversation_last:
+            self.request_speech(q[1]+'. '+'. '.join(q[2])+'. Say yes or no.',identity)
+            return
+        if not q and self.working():
+            self.conversation_phase = 'working'
+            return
+        if not q and t.finished and identity!=self.conversation_last:
+            self.request_speech(t.view.get('reply') or t.view.get('say') or t.view.get('stage','Done'),identity)
+            return
+        if not self.start_recording('conversation'):
+            self.stop_conversation()
 
     def submit(self):
         e = self.editor
@@ -1139,17 +1345,10 @@ class Screen:
                 if t.turn and not t.finished and now > deadline:
                     t.show(f'Timed out waiting; turn {t.turn} may still be active. Use --resume; no request was replayed.')
                     return 4
-            if self.recorder.process and self.recorder.seconds() >= RECORD_MOST:
-                self.voice()
+            self.audio_tick(now)
             try:
-                kind, words = self.heard.get_nowait()
-                self.transcribing = False
-                if kind == 'text' and words:
-                    self.editor.insert(safe(words.replace('\n', ' ')))
-                elif kind == 'text':
-                    self.notice('Mike heard nothing')
-                else:
-                    self.block('error', words)
+                kind, payload = self.heard.get_nowait()
+                self.audio_event(kind,payload)
             except queue.Empty:
                 pass
             ready, _, _ = select.select([self.fd_in], [], [], 0.1)

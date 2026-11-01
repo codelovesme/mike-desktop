@@ -26,6 +26,7 @@ def note(event):
     with log.open('a') as f:f.write(json.dumps(event)+'\n')
 class Recorder:
     process=None
+    path="unused.wav"
     @classmethod
     def available(cls):return True
     def start(self):self.process=True;self.started=time.monotonic();note('start');return True
@@ -33,14 +34,17 @@ class Recorder:
     def stop(self):self.process=None;note('stop');return b'RIFF'
 class Terminal:
     owner,device,workspace='voice-test@localhost','test','/scratch'
-    turn,finished,view,local,waiting,status,started='',False,{},None,[],{},0
+    turn,finished,view,local,waiting,status,started='',False,{},None,[],{'voice_chat':True},0
     def __init__(self):self.service=self
     def running(self):return False
     def doing(self):return ''
     def poll(self):return None
-    def command(self,line):return None
+    def command(self,line):note({"command":line});return None
     def call(self,route,body,timeout=20):
         assert route=='/v1/chat/hear';note('hear');return {'text':'heard words '}
+class Detector:
+    def inspect(self,*a):return ''
+screen.Detector=Detector
 screen.Recorder=Recorder
 with screen.Screen(Terminal(),None) as ui:
     draw=ui.draw
@@ -112,21 +116,38 @@ def main():
                 until(lambda:events().count('hear')==count,'release did not transcribe')
                 key('Control_L' if release=='space' else 'space',False)
                 until(lambda:any(isinstance(e,dict) and e['draft'].startswith('draft ') and e['draft'].count('heard words')==count for e in events()),'draft not preserved')
-            key('Control_L',True);key('space',True)
-            until(lambda:events().count('start')==3,'third hold did not start')
+            def shortcut(shift=False):
+                key('Control_L',True)
+                if shift:key('Shift_L',True)
+                tap('space')
+                if shift:key('Shift_L',False)
+                key('Control_L',False)
+            for count,stop in ((3,'space'),(4,'Return'),(5,'shortcut')):
+                shortcut();until(lambda:events().count('start')==count,'tap did not start')
+                time.sleep(.5)
+                assert events().count('stop')==count-1,events()
+                if stop=='shortcut':shortcut()
+                else:tap(stop)
+                until(lambda:events().count('hear')==count,'latched stop did not transcribe')
+                assert not any(isinstance(e,dict) and 'command' in e for e in events()),events()
+            for count,stop_shift in ((6,False),(7,True)):
+                shortcut(True);until(lambda:events().count('start')==count,'conversation did not listen')
+                shortcut(stop_shift);until(lambda:events().count('stop')==count,'conversation did not stop')
+                assert events().count('hear')==5,events()
+            shortcut();until(lambda:events().count('start')==8,'latched focus test did not start')
             other=d.screen().root.create_window(0,0,50,50,0,d.screen().root_depth,X.InputOutput,X.CopyFromParent)
             other.map();other.set_input_focus(X.RevertToParent,X.CurrentTime);d.sync()
-            until(lambda:events().count('hear')==3,'focus loss did not stop')
-            key('space',False);key('Control_L',False)
+            until(lambda:events().count('stop')==8,'focus loss did not close capture')
+            assert events().count('hear')==5,events()
             window.set_input_focus(X.RevertToParent,X.CurrentTime);d.sync();other.destroy()
             key('Control_L',True);key('space',True)
-            until(lambda:events().count('start')==4,'final hold did not start')
+            until(lambda:events().count('start')==9,'final hold did not start')
             tap('u');tap('d');key('space',False);key('Control_L',False)
             end=time.monotonic()+10
             while time.monotonic()<end and 'exit' not in events():time.sleep(.05)
             assert 'exit' in events(),events()
-            assert events().count('stop')==4 and events().count('hear')==3,events()
-            print('PASS real Ctrl+Space: hold/repeat, Space-first and Ctrl-first release, draft, focus loss, exit'+(' through IDE' if args.ide else ' in console'))
+            assert events().count('stop')==9 and events().count('hear')==5,events()
+            print('PASS real shortcuts: hold, tap latch, Space/Enter/Ctrl+Space stop, both conversation toggles, focus loss, exit'+(' through IDE' if args.ide else ' in console'))
         finally:
             d.close()
             if app.poll() is None:app.terminate()
