@@ -15,6 +15,7 @@ import unicodedata
 
 from mike_service import MikeService, ServiceError, ServiceUnavailable
 import sign_in
+import ide_context
 
 # How many messages may wait while Mike works on one.
 QUEUE_MOST = 10
@@ -102,9 +103,15 @@ class Terminal:
             return
         if len(text.encode()) > 16384:
             raise ValueError('message exceeds 16 KiB')
+        enclosing_ide = ide_context.current()
+        submitted = text
+        if enclosing_ide:
+            submitted = '[Local IDE context for this turn]\n' + enclosing_ide + '\n[User message]\n' + text
+            if len(submitted.encode()) > 16384:
+                raise ValueError('message plus IDE context exceeds 16 KiB; shorten the message')
         if self.prompt: self.emit('you', None, text)
         # Never retry this POST: a lost reply may already have started a turn.
-        self.turn = self.service.call('/v1/chat/ask', {'text':text, 'workspace':self.workspace})['turn_id']
+        self.turn = self.service.call('/v1/chat/ask', {'text':submitted, 'workspace':self.workspace})['turn_id']
         self.steps, self.finished, self.shown, self.view = 0, False, set(), {}
         self.started = time.monotonic()
         if not self.prompt: self.show(f'Turn {self.turn} (resume with --resume {self.turn})')

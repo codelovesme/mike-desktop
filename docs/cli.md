@@ -143,3 +143,18 @@ The archive contains only Python client code, its launcher and metadata.
 same minor-series compatibility rule as Desktop. `cdlvsm install mike-cli`
 becomes usable when that release's assets have been published; a source
 commit does not publish a release. No GUI or Code runtime is bundled in CLI.
+
+## CodeLovesMe IDE context
+
+When launched in an IDE terminal with session context support, the CLI refreshes
+that IDE's identity, project and originating terminal before each message.
+Mike can use its existing local terminal tool to run `ide-control` for state,
+terminal movement and resizing. The context supplies an absolute helper command
+and a private descriptor path, so the shared service need not inherit the
+terminal's environment. No credential is sent to the model, and context grants
+no tool permission: the normal local command approval still applies.
+
+A closed or unavailable IDE fails clearly before submitting a new message.
+Outside an IDE, message submission is unchanged. Resuming an existing turn
+continues that turn's original context; it does not retarget already accepted
+work. A new message refreshes context for its current terminal.
