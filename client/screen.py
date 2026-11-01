@@ -46,6 +46,9 @@ IMAGE_MOST = 10 << 20
 RECORD_MOST = 60
 
 COMMANDS = [
+    ('/model', 'MODEL', 'list or choose the model for the next message'),
+    ('/think', 'LEVEL', 'off, low, medium, high for compatible models'),
+    ('/mode', 'MODE', 'ask, plan or auto within project grants'),
     ('/help', '', 'what you can type and press'),
     ('/status', '', 'account, computer, project, turn'),
     ('/clear', '', 'clear the screen (Mike keeps the conversation)'),
@@ -830,9 +833,16 @@ class Screen:
         if self.flash and time.monotonic() < self.flash_until:
             left.append(f'{YELLOW}{self.flash}{RESET}')
         status = t.status or {}
-        for name, label in (('model', 'model'), ('effort', 'thinking'), ('mode', 'mode')):
+        if status.get('chat_version') == 2:
+            status = getattr(t, 'options', None) or status
+            if t.turn and not t.finished and t.view.get('model'):
+                status = {key: t.view.get(key) for key in ('model','thinking','mode')}
+        for name, label in (('model', 'model'), ('thinking', 'thinking'), ('mode', 'mode')):
             if status.get(name):
-                left.append(f'{ACCENT}{label}: {status[name]}{RESET}')
+                value = status[name]
+                if name == 'model':
+                    value = next((m.get('label', m['id']) for m in getattr(t, 'settings', {}).get('models', []) if m['id'] == value), value)
+                left.append(f'{ACCENT}{label}: {value}{RESET}')
         project = t.workspace.replace(str(Path.home()), '~', 1)
         left.append(f'{GRAY}{t.owner} · {project}{RESET}')
         if t.waiting:
@@ -923,6 +933,11 @@ class Screen:
             self.submit()
         elif value == 'newline':
             e.insert('\n')
+        elif value == 'shift-tab':
+            modes = ('ask', 'plan', 'auto')
+            options = getattr(self.terminal, 'options', {'mode':'ask'})
+            mode = modes[(modes.index(options.get('mode','ask')) + 1) % len(modes)]
+            self.run('/mode '+mode, echo=False)
         elif value == 'tab':
             menu = self.menu()
             if menu:
@@ -1023,8 +1038,17 @@ class Screen:
             e.clear()
             return
         if e.images_used() and not text.startswith('/'):
-            self.block('error', 'Mike cannot take images yet (my-euglena-apps ticket 185). '
-                       'Remove the [Image #…] with backspace to send the text.')
+            from images import attachment
+            from mike_service import ServiceError
+            try:
+                attachments = [attachment(*e.images[n]) for n in e.images_used()]
+                self.terminal.ask(text, images=attachments)
+            except (ValueError, ServiceError) as error:
+                self.block('error', str(error))
+                return
+            e.remember(text)
+            e.clear()
+            self.held = None
             return
         e.remember(text)
         e.clear()

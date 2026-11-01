@@ -158,3 +158,29 @@ A closed or unavailable IDE fails clearly before submitting a new message.
 Outside an IDE, message submission is unchanged. Resuming an existing turn
 continues that turn's original context; it does not retarget already accepted
 work. A new message refreshes context for its current terminal.
+
+## Models, thinking, modes and images (chat protocol 2)
+
+`/model` lists configured chat models and their image/thinking capabilities;
+`/model MODEL` selects one. `/think off|low|medium|high` selects the requested
+thinking level on a compatible model. The footer shows the active turn's
+choices; changes during work apply to the next message, including messages
+queued while Mike works. `/mode ask|plan|auto`, or Shift+Tab, selects:
+
+- ask: every local command needs confirmation, even when a run grant exists;
+- plan: Mike proposes a plan and runs no tool or memory operation; saying yes
+  explicitly continues in ask mode, and saying no preserves the plan;
+- auto: only commands already covered by a run grant execute without asking.
+  Outside those grants, ordinary approval remains necessary.
+
+Ctrl+V attaches a clipboard PNG/JPEG; pasted file paths also attach supported
+images. Up to three files, 2 MiB each and 4 MiB total. Sending to a model that
+cannot see images fails clearly and keeps the draft. Image bytes are validated
+again by the local service and fully decoded by Mike's API; they are not put in
+conversation archives or memory extraction. Images and choices follow the turn
+through explicit resume; they are never retargeted by another client's settings.
+
+Replies still arrive when complete. Incremental response display is deferred.
+The client still supports chat protocol 1 for ordinary text; new controls need
+an updated service and API. A service restart retains pairing but its account
+session is held in memory: reconnect through the normal browser sign-in flow.

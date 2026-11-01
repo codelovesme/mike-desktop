@@ -16,6 +16,7 @@ import unicodedata
 from mike_service import MikeService, ServiceError, ServiceUnavailable
 import sign_in
 import ide_context
+import images as image_input
 
 # How many messages may wait while Mike works on one.
 QUEUE_MOST = 10
@@ -50,6 +51,8 @@ class Terminal:
         self.status = {}       # the service's last state
         self.device = '?'
         self.started = 0.0     # when this turn began
+        self.settings = {}
+        self.options = {"model": "", "thinking": "off", "mode": "ask"}
         self.defer = False     # the screen shows the header itself
 
     def emit(self, kind, legacy, pretty=None, data=None):
@@ -70,10 +73,15 @@ class Terminal:
             raise ServiceError(409, {'error':'account_changed', 'message':'account changed; start a new CLI session'})
         if state.get('connection') != 'connected' or not state.get('account'):
             raise ServiceError(409, {'error':'signed_out', 'message':'not signed in; mike-cli --sign-in opens your browser to sign in (headless enrollment alone is not a chat login)'})
-        if state.get('chat_version') != 1:
+        if state.get('chat_version') not in (1, 2):
             raise ServiceError(426, {'error':'chat_incompatible', 'message':'upgrade mike-service to one supporting CLI chat version 1'})
         self.owner = state['account']
         self.device, self.status = str(state.get('device_id', '?')), state
+        if state.get('chat_version') == 2:
+            self.settings = self.service.call('/v1/chat/settings', {})
+            configured = {m['id'] for m in self.settings.get('models', [])}
+            if self.options['model'] not in configured:
+                self.options['model'] = self.settings['default_model']
         if self.prompt:
             self.show('Reconnected to the Mike service.')
             return state
@@ -90,12 +98,21 @@ class Terminal:
         self.started = time.monotonic()
         self.render(view)
 
-    def ask(self, text):
+    def ask(self, text, images=None, options=None):
+        attachments = image_input.validate(images or [])
+        selected = dict(options or self.options)
         if not text.strip():
             return
+        if attachments:
+            chosen = next((m for m in self.settings.get('models', []) if m['id'] == selected['model']), {})
+            if not chosen.get('vision'):
+                raise ValueError('this model cannot see images; choose a vision model or remove the attachment')
         if self.turn and not self.finished:
             if self.interactive and len(self.waiting) < QUEUE_MOST:
-                self.waiting.append(text)
+                if self.status.get('chat_version') == 2:
+                    self.waiting.append({'text': text, 'images': attachments, 'options': selected})
+                else:
+                    self.waiting.append(text)
                 if self.prompt: return
                 self.show(f'Queued ({len(self.waiting)} waiting): it goes when this turn ends. /unqueue takes them back.')
                 return
@@ -111,7 +128,13 @@ class Terminal:
                 raise ValueError('message plus IDE context exceeds 16 KiB; shorten the message')
         if self.prompt: self.emit('you', None, text)
         # Never retry this POST: a lost reply may already have started a turn.
-        self.turn = self.service.call('/v1/chat/ask', {'text':submitted, 'workspace':self.workspace})['turn_id']
+        body = {'text':submitted, 'workspace':self.workspace}
+        if self.status.get('chat_version') == 2:
+            body.update(selected)
+            body['images'] = attachments
+        elif attachments:
+            raise ValueError('upgrade Mike service to send images')
+        self.turn = self.service.call('/v1/chat/ask', body)['turn_id']
         self.steps, self.finished, self.shown, self.view = 0, False, set(), {}
         self.started = time.monotonic()
         if not self.prompt: self.show(f'Turn {self.turn} (resume with --resume {self.turn})')
@@ -171,7 +194,9 @@ class Terminal:
             return 3
         if self.finished and self.waiting:
             self.finished, self.turn = False, ''
-            self.ask(self.waiting.pop(0))
+            queued = self.waiting.pop(0)
+            if isinstance(queued, dict): self.ask(**queued)
+            else: self.ask(queued)
         return None
 
     def running(self):
@@ -206,6 +231,30 @@ class Terminal:
         arg = arg.strip()
         if verb in ('/quit', '/exit'):
             return 'quit'
+        if verb in ('/model', '/think', '/mode'):
+            if self.status.get('chat_version') != 2:
+                raise ValueError('upgrade Mike service for model, thinking and mode controls')
+            if verb == '/model':
+                models = self.settings.get('models', [])
+                if not arg:
+                    self.show('\n'.join(f"{m['id']} — {m.get('label', m['id'])}; images: {bool(m.get('vision'))}; thinking: {bool(m.get('thinking'))}" for m in models))
+                    return
+                model = next((m for m in models if m['id'] == arg), None)
+                if model is None: raise ValueError('choose a configured model from /model')
+                self.options['model'] = arg
+                if not model.get('thinking'): self.options['thinking'] = 'off'
+            elif verb == '/think':
+                if not arg: self.show('Thinking: '+self.options['thinking']); return
+                if arg not in ('off','low','medium','high'): raise ValueError('thinking is off, low, medium or high')
+                model = next((m for m in self.settings.get('models', []) if m['id'] == self.options['model']), {})
+                if arg != 'off' and not model.get('thinking'): raise ValueError('this model does not offer thinking controls')
+                self.options['thinking'] = arg
+            else:
+                if not arg: self.show('Mode: '+self.options['mode']); return
+                if arg not in ('ask','plan','auto'): raise ValueError('mode is ask, plan or auto')
+                self.options['mode'] = arg
+            self.show('Next message: ' + ', '.join(f'{k}={v}' for k,v in self.options.items()))
+            return
         if verb in ('/new', '/leave'):
             self.show(f'Left turn {self.turn or "(none)"}; accepted work is not cancelled.')
             self.turn, self.view, self.local, self.finished = '', {}, None, False
@@ -213,7 +262,7 @@ class Terminal:
             if not self.waiting:
                 self.show('Nothing is waiting.')
                 return
-            self.show('Taken back, not sent:\n' + '\n'.join(self.waiting))
+            self.show('Taken back, not sent:\n' + '\n'.join(item['text'] if isinstance(item, dict) else item for item in self.waiting))
             self.waiting = []
         elif verb == '/resume':
             if not arg: raise ValueError('/resume needs a turn id')
@@ -317,7 +366,7 @@ def main(argv=None):
     parser.add_argument('--wait', type=int, default=300, help='maximum seconds waiting for a turn (default 300)')
     version_file = Path(__file__).resolve().parent.parent / 'VERSION'
     version = version_file.read_text().strip() if version_file.is_file() else 'dev'
-    parser.add_argument('--version', action='version', version=f'mike-cli {version} (local protocol 1, chat 1)')
+    parser.add_argument('--version', action='version', version=f'mike-cli {version} (local protocol 1, chat 2)')
     args = parser.parse_args(argv)
     accounts = [args.sign_in, args.switch_account, args.sign_out, args.account]
     if sum(accounts) > 1: parser.error('choose one of --sign-in, --switch-account, --sign-out, --account')

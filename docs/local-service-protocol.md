@@ -410,3 +410,18 @@ The IDE owns buffer revisions, diff approval, save status and undo; this
 service does not duplicate its editor implementation. Existing machine
 tool grants/approvals still apply independently. See the IDE repository's
 `docs/mike.md` for supported editor tools and real integration evidence.
+
+## Chat protocol 2: per-turn controls and images
+
+Local protocol remains 1; state.chat_version is 2. POST /v1/chat/settings
+requires the current attached account and returns Mike's authenticated
+ModelSettings catalogue. POST /v1/chat/ask accepts optional model, thinking,
+mode and images in addition to text/workspace; the central API is authoritative
+for model/capability choices. The local listener accepts at most 8 MiB total;
+images are bounded to three PNG/JPEGs, 2 MiB each and 4 MiB decoded total and
+validated before forwarding. The API repeats a full bounded image decode.
+State and turn progress report model/thinking/mode; progress is still polled
+and final reply text is still delivered whole. Account generation, turn/session
+ownership, confirmation nonces and local grant/approval rules are unchanged.
+The CLI may retain next-message preferences; accepted turns keep their original
+choices across settings changes and explicit resume.

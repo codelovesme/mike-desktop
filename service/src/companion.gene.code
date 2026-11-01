@@ -252,7 +252,7 @@ StartService =>
         emit Notice { fatal = true, text = "not started: no random source for the client key" } to this
         return NotConfigured { reason = "no random source" }
     client_key = key.value
-    emit Config { host = "127.0.0.1", port = 0, max_body_bytes = 4194304, response_timeout_seconds = 40 } to local get set
+    emit Config { host = "127.0.0.1", port = 0, max_body_bytes = 8388608, response_timeout_seconds = 40 } to local get set
     if set ∈ Exception or not set.ok
         emit Notice { fatal = true, text = "not started: the local listener could not be configured" } to this
         return NotConfigured { reason = "listener" }
@@ -1019,6 +1019,9 @@ Route { method, path, body, headers } =>
     if path = "/v1/editor/result" or path = "/v1/editor/close"
         emit EditorRelay { session = session, request = request, close = path = "/v1/editor/close" } to this get relayed
         return relayed
+    if path = "/v1/chat/settings"
+        emit ChatSettings { session = session } to this get settings
+        return settings
     if path = "/v1/chat/ask"
         emit ChatAsk { session = session, request = request } to this get asked
         return asked
@@ -1142,7 +1145,10 @@ Attach { request } =>
         return no_secret
     emit Timestamp to core get now
     session_serial += 1
-    session = { id = "s" + session_serial, token = secret.value, client = client, approvals = approvals, seen = now.value, generation = generation }
+    session = { id = "s" + session_serial, token = secret.value, client = client, approvals = approvals, seen = now.value, generation = generation, model = "", thinking = "off", mode = "ask" }
+    if account_token ≠ ""
+        emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = ModelSettings } } to this get model_settings
+        if model_settings ∈ ModelSettings, session = session + { model = model_settings.default_model }
     sessions += [session]
     emit StateFor { session = session } to this get state
     return Answer { status = 200, value = { protocol = protocol_version, service = service_version, session_id = session.id, session_token = secret.value, generation = generation, state = state.value } }
@@ -1185,7 +1191,10 @@ StateFor { session } =>
         account = account_email
         device_id = device_id
         editor_version = 1
-        chat_version = 1
+        chat_version = 2
+        model = session.model
+        thinking = session.thinking
+        mode = session.mode
         connection = connection
         paired = credential ≠ ""
         capabilities = offered.items
@@ -1345,6 +1354,12 @@ ForgetTurns =>
     turns = []
     return Forgotten
 
+ChatSettings { session } =>
+    if account_token = "", return Answer { status = 409, value = { error = "signed_out", message = "connect an account first" } }
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = ModelSettings } } to this get settings
+    if settings ∉ ModelSettings, return Answer { status = 503, value = { error = "settings_unavailable", message = "Mike's model settings are unavailable" } }
+    return Answer { status = 200, value = settings }
+
 ChatAsk { session, request } =>
     if account_token = ""
         emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
@@ -1352,6 +1367,11 @@ ChatAsk { session, request } =>
     if request.text ∉ String or request.text = ""
         emit Fail { status = 400, error = "bad_request", message = "text is required" } to this get empty
         return empty
+    if request.images ≠ null
+        emit Stringify { value = request.images } to json get encoded_images
+        emit Run { command = "/usr/bin/python3", args = [adapters_dir + "/validate_images.py"], stdin = encoded_images.value } to proc get checked
+        if checked ∈ Exception or not checked.success
+            return Answer { status = 400, value = { error = "invalid_images", message = "use at most three PNG/JPEG images, 2 MiB each and 4 MiB total" } }
     workspace = ""
     if request.workspace ∈ String
         emit Length { value = request.workspace } to core get size
@@ -1377,10 +1397,17 @@ ChatAsk { session, request } =>
             emit Fail { status = 503, error = "no_random_source", message = "could not bind editor" } to this get no_binding
             return no_binding
         editor = { binding = binding.value, mode = mode, workspace = workspace, context = request.editor.context }
-    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text, device_id = device_id, workspace = workspace, editor = editor } } } to this get started
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text, device_id = device_id, workspace = workspace, editor = editor, model = request.model, thinking = request.thinking, mode = request.mode, images = request.images } } } to this get started
     if started ∉ Thinking
-        emit Fail { status = 503, error = "mike_unavailable", message = "Mike did not start the turn" } to this get unavailable
+        reason = "Mike did not start the turn"
+        if started.reason ∈ String, reason = started.reason
+        emit Fail { status = 400, error = "turn_rejected", message = reason } to this get unavailable
         return unavailable
+    selected_sessions = []
+    loop one over sessions
+        if one.id = session.id, one = one + { model = request.model, thinking = request.thinking, mode = request.mode }
+        selected_sessions += [one]
+    sessions = selected_sessions
     emit RememberChat { turn_id = started.turn_id, session = session.id, editor = editor } to this
     return Answer { status = 200, value = { turn_id = started.turn_id } }
 
@@ -1483,7 +1510,7 @@ ChatView { session, turn, id } =>
     editor_request = null
     loop one over turns
         if one.turn_id = id and one.session = session.id and one.editor ∈ Object, editor_request = turn.editor_request
-    return Answer { status = 200, value = { turn_id = id, stage = turn.stage, reply = reply, say = say, confirmation_id = nonce, steps = steps, work_id = work_id, editor_request = editor_request } }
+    return Answer { status = 200, value = { turn_id = id, stage = turn.stage, reply = reply, say = say, confirmation_id = nonce, steps = steps, work_id = work_id, editor_request = editor_request, model = turn.model, thinking = turn.thinking, mode = turn.mode } }
 
 ChatConfirm { session, request } =>
     emit OwnTurn { session = session, turn_id = request.turn_id } to this get owned

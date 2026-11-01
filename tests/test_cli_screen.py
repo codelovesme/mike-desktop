@@ -128,13 +128,13 @@ class ScreenTest(unittest.TestCase):
         s.editor.insert(screen.safe(words))
         self.assertEqual(s.editor.text, 'hello[2J  there')
 
-    def test_image_is_refused_until_mike_takes_images(self):
+    def test_damaged_image_is_refused_without_losing_the_draft(self):
         s = self.make()
         s.editor.add_image('image/png', b'x')
         s.submit()
         self.assertEqual(s.terminal.lines, [])
         self.assertIn('[Image #1]', s.editor.text)
-        self.assertIn('cannot take images', s.out.getvalue())
+        self.assertIn('image content is not a PNG', s.out.getvalue())
 
     def test_slash_menu_enter_completes_a_command_that_needs_words(self):
         s = self.make()
