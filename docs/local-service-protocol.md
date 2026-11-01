@@ -80,7 +80,13 @@ are dropped, and every session of the old generation answers **409
 `device_revoked`) to its next request. The client clears what it showed and
 attaches again. No client can see the previous owner's results.
 
-The account token and the device credential are never returned to a client.
+The device credential is never returned to a client. Normal state/attach and
+CLI routes never return the account token. Desktop alone explicitly requests
+`POST /v1/account/desktop-session` with its matching `host` through an attached
+`desktop`, approval-capable session, to initialize the embedded authenticated
+web page from the shared service login. The existing browser-request rejection,
+private endpoint/key and account-generation checks apply; a client label is not
+a security boundary against another process of the same OS user.
 
 ## Routes
 
@@ -99,6 +105,7 @@ The account token and the device credential are never returned to a client.
 | `POST /v1/chat/resume` | `turn_id` | same as progress, after central ownership check |
 | `POST /v1/chat/confirm` | `turn_id`, `yes`, `confirmation_id` | `{sent:bool}` |
 | `POST /v1/chat/hear` | `audio_base64` (≤4,000,000 chars, about a minute of 16 kHz mono WAV), `format`: `wav`\|`webm` | `{text}` — Mike's `Hear`; nothing is kept or asked |
+| `POST /v1/account/desktop-session` | `host` equal to service host; Desktop session only | `{token, account, host}` for the embedded page only |
 | `POST /v1/enroll/start` (control) | `account`, `name`? | `{user_code, expires_in, name, account}` |
 | `POST /v1/grants/add` (control) | `root`, `run`, `ask`, `minutes`?, `timeout_seconds`? | `{grant}` |
 | `POST /v1/grants/revoke` (control) | `grant_id` | `{revoked:true}` |
@@ -316,19 +323,39 @@ back; only an explicit `connect=switch` pairs it again, as a new device.
 | `attach … connect=switch` to another account | stopped, reported to the old account | reported to the old account | other account's pairing used/created | all end (`account_changed`) |
 | Revoked on the website (heartbeat refused) | stopped; gateway reports `unknown` | dropped; gateway reports revoked | deleted; revocation remembered across restarts | all end (`device_revoked`) |
 | `device/revoke` from a client | stopped, reported, then revoked | reported, then revoked | revoked at the gateway, deleted; revocation remembered | all end (`device_revoked`) |
-| Service stopped (`systemctl --user stop`) | killed with the unit's cgroup; reported `failed`/unknown after restart | reported not run after restart | kept | gone; account token gone |
+| Service stopped (`systemctl --user stop`) | killed with the unit's cgroup; reported `failed`/unknown after restart | reported not run after restart | kept | gone; saved account restored after validation |
 | Service crash / kill | killed with the unit's cgroup (outside systemd the worker's own time limit still applies); reported `failed`/unknown after restart | reported not run after restart | kept | gone |
 | Grant revoked (Mike or `grant revoke`) | a command under it is stopped (`cancelled`) | an `ask` step under it can no longer be answered | kept | kept |
 | Grant expires | finishes within its bound | lapses | kept | kept |
 | Network lost (headless) | continues within its bound; result retried until the step expires | waits at the gateway | kept | kept |
 
-The account token lives only in the service's memory. After a restart the
-pairing is still on disk but the service is signed out until a client
-attaches with `connect=auto` (Desktop does this from its web session). A
-task that was claimed when the service stopped is then reported once:
-`cancelled`/"did not run" if it had not been approved, `failed`/"whether
-it finished is unknown" if its effect had begun. Nothing is replayed, and
-no checkpoint or resumption exists.
+The account session is now stored in `account-session.json`, bound to the
+configured backend, verified owner and saved device ID. The state directory is
+0700; the file must be this user's regular 0600 file, never a symlink. Writes use
+an exclusive random sibling, fsync and atomic replacement; secrets travel on
+stdin, not process arguments, and errors omit their contents. Storage failures
+are reported rather than claiming a persistent login or successful sign-out.
+
+On restart the service loads the existing pairing and validates the saved account
+with auth `Me`; it does not pair another device or need an attached UI. During
+backend outages it reports `restoring` and retries every 30 seconds while keeping
+the saved record. On success it resumes heartbeat/task receipt; `chat_authenticated`
+in state distinguishes a usable account session from headless enrollment alone.
+Valid account tokens refresh hourly through `RefreshToken`, with bounded retries
+on outage. Refused/deactivated/expired accounts discard the cached session and
+end the old client generation. This does not create a new long-lived refresh-token
+protocol: a token already expired while the service was stopped requires login.
+
+Sign-out removes the saved account, as do account refusal and device revocation.
+Explicit switching ends the previous generation before writing the new account.
+The saved headless device identity and its existing grants remain separate;
+enrollment alone still does not supply account chat credentials. A signed-in
+account on that same headless service can now be restored as well. UI detach
+never clears the shared account. No window does not authorize a local command.
+
+A task claimed when the service stopped is reported after reconnect: cancelled
+if it had not been approved, failed/unknown if its effect had begun. Nothing is
+replayed and no command checkpoint/resumption is introduced.
 
 ## systemd user unit
 

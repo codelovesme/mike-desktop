@@ -201,3 +201,9 @@ Replies still arrive when complete. Incremental response display is deferred.
 The client still supports chat protocol 1 for ordinary text; new controls need
 an updated service and API. A service restart retains pairing but its account
 session is held in memory: reconnect through the normal browser sign-in flow.
+
+The shared service persists a successful account sign-in privately and restores
+it after restart. CLI and Desktop reuse that account; no separate login per
+window. A reconnecting service reports an offline/restoring error rather than
+asking for another login. Expired/refused credentials still require sign-in.
+Only the service stores the account record; the CLI does not read its file.

@@ -71,6 +71,10 @@ class Terminal:
         state = self.service.attach(token, connect='auto' if token else 'none')
         if self.owner and state.get('account') != self.owner:
             raise ServiceError(409, {'error':'account_changed', 'message':'account changed; start a new CLI session'})
+        if state.get('connection') == 'restoring':
+            raise ServiceError(503, {'error':'restoring', 'message':'the service is restoring its saved account; retry when the backend reconnects'})
+        if state.get('connection') != 'connected' and state.get('chat_authenticated'):
+            raise ServiceError(503, {'error':'offline', 'message':'the signed-in service is reconnecting; no new login is needed'})
         if state.get('connection') != 'connected' or not state.get('account'):
             raise ServiceError(409, {'error':'signed_out', 'message':'not signed in; mike-cli --sign-in opens your browser to sign in (headless enrollment alone is not a chat login)'})
         if state.get('chat_version') not in (1, 2):
@@ -393,7 +397,7 @@ def main(argv=None):
     terminal = Terminal(service, str(workspace), interactive)
     terminal.defer = interactive
     try:
-        token = getpass.getpass('Account session token (not saved): ') if args.connect else None
+        token = getpass.getpass('Account session token (saved privately by the service): ') if args.connect else None
         if args.token_stdin: token = sys.stdin.readline(65537).strip()
         if (args.connect or args.token_stdin) and (not token or len(token) > 65536):
             raise ValueError('provide a nonempty account token of at most 64 KiB')

@@ -31,6 +31,9 @@ spawned = 0
 
 account_email = ""
 account_token = ""
+account_restore = null
+account_retry_at = 0
+account_refresh_at = 0
 device_id = ""
 credential = ""
 connection = "signed_out"
@@ -278,8 +281,10 @@ StartService =>
     if was_revoked ∈ ReadText
         revoked_latch = true
         connection = "revoked"
+        emit ForgetAccountSession to this
     if not revoked_latch
         emit LoadHeadless to this
+        emit LoadAccountSession to this
     running = true
     emit Notice { text = "ready for local clients on 127.0.0.1:" + listen_port + " (protocol " + protocol_version + ", host " + host_url + ")" } to this
     return ServiceStarted
@@ -317,6 +322,100 @@ AccountFor { token } =>
     if account ∉ Account or account.active ≠ true or account.verified ≠ true or account.email ∉ String
         return NoAccount
     return account
+
+| ---- One persisted account for every local UI, independent of windows ----
+
+AccountStore { action, value } =>
+    input = ""
+    if action = "write"
+        emit Stringify { value = value } to json get encoded
+        input = encoded.value
+    emit Run { command = "/usr/bin/python3", args = [adapters_dir + "/account_session.py", action, state_dir], stdin = input } to proc get stored
+    if stored ∈ Exception or not stored.success, return SessionStoreFailed
+    if action ≠ "read", return SessionStored
+    emit Parse { text = stored.stdout } to json get parsed
+    if parsed ∈ Exception or parsed.value ∉ Object, return SessionStoreFailed
+    return SessionRecord { value = parsed.value }
+
+SaveAccountSession =>
+    if account_token = "" or account_email = "" or credential = "", return SessionStoreFailed
+    emit AccountStore { action = "write", value = { version = 1, host = host_url, owner = account_email, device_id = device_id, token = account_token } } to this get saved
+    return saved
+
+ForgetAccountSession =>
+    account_restore = null
+    account_retry_at = 0
+    account_refresh_at = 0
+    emit AccountStore { action = "remove", value = null } to this get removed
+    return removed
+
+LoadAccountSession =>
+    emit AccountStore { action = "read", value = null } to this get loaded
+    if loaded ∉ SessionRecord, return NoSavedSession
+    saved = loaded.value
+    if saved.version ≠ 1 or saved.host ≠ host_url or saved.owner ∉ String or saved.token ∉ String or saved.token = ""
+        return NoSavedSession
+    emit LoadIdentity { owner = saved.owner } to this get identity
+    if identity ∉ SavedIdentity or identity.device_id ≠ saved.device_id
+        return NoSavedSession
+    if headless and account_email ≠ saved.owner, return NoSavedSession
+    account_restore = saved
+    account_retry_at = 0
+    connection = "restoring"
+    return SessionQueued
+
+MaintainAccount { now } =>
+    if account_restore ≠ null
+        if now < account_retry_at, return SessionWaiting
+        account_retry_at = now + 30
+        saved = account_restore
+        emit ApiCall { app = "auth", particle = Impulse { token = saved.token, particle = Me } } to this get checked
+        if checked ∈ ApiUnavailable or checked ∈ Unavailable, return SessionWaiting
+        if checked ∉ Account or checked.email ≠ saved.owner or checked.active ≠ true or checked.verified ≠ true
+            emit ExpireAccount to this
+            return SessionRefused
+        emit LoadIdentity { owner = saved.owner } to this get identity
+        if identity ∉ SavedIdentity or identity.device_id ≠ saved.device_id
+            emit ExpireAccount to this
+            return SessionRefused
+        account_email = saved.owner
+        account_token = saved.token
+        device_id = identity.device_id
+        credential = identity.credential
+        emit LoadDeviceLedger to this
+        account_restore = null
+        account_refresh_at = now
+        connection = "offline"
+        emit Notice { text = "restored the saved account; reconnecting this device without a UI" } to this
+    if account_token = "" or now < account_refresh_at, return SessionMaintained
+    account_refresh_at = now + 60
+    emit ApiCall { app = "auth", particle = Impulse { token = account_token, particle = RefreshToken } } to this get refreshed
+    if refreshed ∈ ApiUnavailable or refreshed ∈ Unavailable, return SessionWaiting
+    if refreshed ∉ SignedIn or refreshed.email ≠ account_email or refreshed.verified ≠ true or refreshed.token ∉ String or refreshed.token = ""
+        emit ExpireAccount to this
+        return SessionRefused
+    account_token = refreshed.token
+    emit SaveAccountSession to this get saved
+    if saved ∈ SessionStored, account_refresh_at = now + 3600
+    return SessionMaintained
+
+ExpireAccount =>
+    emit EndGeneration { reason = "session_expired", detail = "the account session needs a fresh sign-in", can_report = false } to this
+    emit ClearAccount to this
+    connection = "session_expired"
+    emit Notice { text = "account session refused; sign in again to resume chat" } to this
+    return SessionExpired
+
+| Desktop's embedded authenticated web page needs an explicit handoff; normal
+| state/attach and CLI responses still never contain the account token.
+DesktopAccountSession { session, request } =>
+    if session.client ≠ "desktop" or not session.approvals or request.host ≠ host_url
+        emit Fail { status = 403, error = "desktop_required", message = "this handoff belongs to the local Desktop and its configured host" } to this get denied
+        return denied
+    if account_token = "" or account_restore ≠ null
+        emit Fail { status = 409, error = "signed_out", message = "sign in to this service first" } to this get missing
+        return missing
+    return Answer { status = 200, value = { token = account_token, account = account_email, host = host_url } }
 
 | ---- The pairing, kept private to this service ----
 
@@ -467,6 +566,7 @@ ConnectAccount { token, email } =>
     return Connected
 
 ClearAccount =>
+    emit ForgetAccountSession to this
     account_token = ""
     if headless
         return Cleared
@@ -509,6 +609,7 @@ LoseDevice { detail } =>
 ServiceTick =>
     emit Timestamp to core get now
     emit ExpireSessions { now = now.value } to this
+    emit MaintainAccount { now = now.value } to this
     if credential ≠ "" and (account_token ≠ "" or headless)
         emit Pulse to this
     if enrollment ≠ null
@@ -528,8 +629,7 @@ Pulse =>
         emit LoseDevice { detail = "this computer's access was revoked" } to this
         return Revoked
     if pulse ∈ Denied
-        | The account session expired; a client must attach with a fresh one.
-        connection = "session_expired"
+        emit ExpireAccount to this
         return Offline
     if pulse ∉ DeviceOnline
         connection = "offline"
@@ -1003,8 +1103,14 @@ Route { method, path, body, headers } =>
     if path = "/v1/work/stop"
         emit StopWork { session = session, request = request } to this get stopping
         return stopping
+    if path = "/v1/account/desktop-session"
+        emit DesktopAccountSession { session = session, request = request } to this get handoff
+        return handoff
     if path = "/v1/signout"
-        emit SignOut { detail = "signed out on this computer" } to this
+        emit SignOut { detail = "signed out on this computer" } to this get ended
+        if ended ∉ SignedOut
+            emit Fail { status = 503, error = "session_not_removed", message = "the saved login could not be removed; sign-out did not complete" } to this get blocked
+            return blocked
         return Answer { status = 200, value = { signed_out = true } }
     if path = "/v1/device/revoke"
         emit RevokeThisDevice to this get revoked
@@ -1110,6 +1216,10 @@ Attach { request } =>
     if mode ≠ "none" and mode ≠ "auto" and mode ≠ "switch"
         emit Fail { status = 400, error = "bad_request", message = "connect must be none, auto or switch" } to this get bad_mode
         return bad_mode
+    if mode = "none" and account_restore ≠ null
+        emit Timestamp to core get restoring_at
+        emit MaintainAccount { now = restoring_at.value } to this
+        if account_token ≠ "", emit Pulse to this
     if mode ≠ "none"
         if request.token ∉ String or request.token = ""
             emit Fail { status = 400, error = "token_required", message = "connecting needs the account's session token" } to this get no_token
@@ -1118,6 +1228,12 @@ Attach { request } =>
         if account ∉ Account
             emit Fail { status = 401, error = "account_refused", message = "the account session was refused" } to this get refused
             return refused
+        if account_restore ≠ null and account_restore.owner ≠ account.email
+            if mode ≠ "switch"
+                emit Fail { status = 409, error = "account_mismatch", message = "the saved service login belongs to another account; switch explicitly" } to this get saved_mismatch
+                return saved_mismatch
+            emit EndGeneration { reason = "account_changed", detail = "the saved account on this computer changed", can_report = false } to this
+            emit ClearAccount to this
         same = account_email = account.email and credential ≠ ""
         if same, account_token = request.token
         if not same
@@ -1143,6 +1259,14 @@ Attach { request } =>
                 return unavailable
             revoked_latch = false
             emit Run { command = "rm", args = ["-f", "--", state_dir + "/revoked"] } to proc
+    if mode ≠ "none"
+        account_restore = null
+        emit SaveAccountSession to this get saved_session
+        if saved_session ∉ SessionStored
+            emit Fail { status = 503, error = "session_not_saved", message = "the account is connected but its private session could not be saved; retry sign-in" } to this get unsaved
+            return unsaved
+        emit Timestamp to core get connected_at
+        account_refresh_at = connected_at.value + 3600
     emit Length { value = sessions } to core get open_sessions
     if open_sessions.value ≥ 16
         emit Fail { status = 429, error = "too_many_clients", message = "too many local clients are attached" } to this get crowded
@@ -1205,6 +1329,7 @@ StateFor { session } =>
         thinking = session.thinking
         mode = session.mode
         connection = connection
+        chat_authenticated = account_token ≠ ""
         paired = credential ≠ ""
         capabilities = offered.items
         clients = clients
@@ -1316,6 +1441,8 @@ StopWork { session, request } =>
 | The saved pairing stays private on disk, so signing in again as the same
 | account reuses this device rather than pairing another.
 SignOut { detail } =>
+    emit ForgetAccountSession to this get forgotten
+    if forgotten ∉ SessionStored, return SignOutFailed
     emit EndGeneration { reason = "signed_out", detail = detail, can_report = true } to this
     emit ClearAccount to this
     connection = "signed_out"
@@ -1616,6 +1743,11 @@ LoadHeadless =>
     device_id = saved.device_id
     credential = saved.credential
     connection = "offline"
+    emit LoadDeviceLedger to this
+    emit Notice { text = "headless device loaded; it runs only what its grants cover" } to this
+    return HeadlessLoaded
+
+LoadDeviceLedger =>
     emit ReadPrivate { path = state_dir + "/grants" } to this get saved_grants
     if saved_grants ∈ ReadText
         emit Parse { text = saved_grants.text } to json get parsed
@@ -1624,8 +1756,7 @@ LoadHeadless =>
     if saved_seen ∈ ReadText
         emit Parse { text = saved_seen.text } to json get parsed_seen
         if parsed_seen ∉ Exception and parsed_seen.value ∈ Array, seen_tasks = parsed_seen.value
-    emit Notice { text = "headless device loaded; it runs only what its grants cover" } to this
-    return HeadlessLoaded
+    return DeviceLedgerLoaded
 
 StartEnrollment { session, request } =>
     if not session.approvals

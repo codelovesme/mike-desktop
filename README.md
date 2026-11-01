@@ -70,7 +70,13 @@ the one in `~/.local/state/mike-desktop` for the same account (and leaves those
 files in place for rollback). The pairing survives restart in
 `~/.local/state/mike-service`, with a private
 directory and credential files; only the service reads them. The account
-session token stays in the service's memory. Other paired computers have
+session token is saved atomically in the service's private 0600 account-session
+file inside its 0700 state directory. After restart the service validates and
+restores the account and reconnects this device without an open window. Valid
+sessions are refreshed hourly through the existing auth API; an expired or
+refused account needs a fresh login. Temporary outages retain the saved session.
+CLI clients reuse the service account; Desktop imports it through an explicit
+authenticated local handoff into its embedded Mike page. Other paired computers have
 their own task inboxes, and the website can choose the default target.
 
 ## The shared Mike service
@@ -210,3 +216,15 @@ service as Desktop. See [docs/cli.md](docs/cli.md) for sign-in, project context,
 resuming a central turn, explicit decisions, non-TTY and stop/detach behavior.
 `mike` and `mike-desktop` keep their existing Desktop launch behavior.
 Stage without publishing: `python3 tools/package.py --cli-only v0.5.0 /tmp/mike-packages`.
+
+### One login shared by local interfaces
+
+Sign in once through CLI or Desktop. The running service owns the account and
+keeps this computer online after every window closes and after a service restart.
+Another computer or mobile web session can target the paired device through Mike.
+Execution still follows existing local approvals or explicit headless grants;
+closing a window never grants permission. Sign out affects all attached clients
+and removes the saved session. Explicit account switching replaces it; ordinary
+auto-connect cannot change another account. Device revocation prevents restore.
+The saved access token retains its real expiry: this is not an indefinite login
+or an offline bypass. If the service was stopped beyond expiry, sign in again.

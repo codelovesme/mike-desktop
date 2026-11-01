@@ -232,8 +232,10 @@ class ClientLogTest(unittest.TestCase):
             target.mkdir(mode=0o755)
             os.chmod(target, 0o755)
             (area / "state").symlink_to(target)
-            with self.assertRaises(mike_service.ServiceUnavailable):
-                mike_service.ensure_running(area / "never-run", wait=0, env={"MIKE_SERVICE_STATE_DIR": str(area / "state")})
+            from unittest.mock import patch
+            with patch.object(mike_service, "reachable", return_value=False):
+                with self.assertRaises(mike_service.ServiceUnavailable):
+                    mike_service.ensure_running(area / "never-run", wait=0, env={"MIKE_SERVICE_STATE_DIR": str(area / "state")})
             self.assertEqual(os.stat(target).st_mode & 0o777, 0o755)
             self.assertEqual(list(target.iterdir()), [])
             private = area / "private"

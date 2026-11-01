@@ -499,3 +499,51 @@ emit Call { method = "POST", path = "/v1/signout", body = "{}", bearer = last.va
 assert signed_out.value.signed_out
 emit Call { method = "GET", path = "/v1/state", body = "", bearer = last.value.session_token, extra = {} } to this get after_signout
 assert after_signout.value.reason = "signed_out"
+
+| ---- Saved-account restore, outage retry, refresh and refusal (ticket 197) ----
+emit Get { name = "HOME", default = "" } to system_env get fixture_home
+fixture_state = fixture_home.value + "/.local/state/mike-service"
+emit Respond { command = "/usr/bin/python3", arg = "read", stdout = "{\"version\":1,\"host\":\"https://apps.codeloves.me\",\"owner\":\"ada@example.test\",\"device_id\":\"dev-1\",\"token\":\"tok-ada\"}", code = 0 } to proc
+emit Respond { command = "cat", arg = fixture_state + "/owner", stdout = "ada@example.test", code = 0 } to proc
+emit Respond { command = "cat", arg = fixture_state + "/device_id", stdout = "dev-1", code = 0 } to proc
+emit Respond { command = "cat", arg = fixture_state + "/credential", stdout = "secret-credential", code = 0 } to proc
+emit LoadAccountSession to this get queued_session
+assert queued_session ∈ SessionQueued
+emit Forget to http
+emit MaintainAccount { now = 100 } to this get offline_restore
+assert offline_restore ∈ SessionWaiting
+emit Posted to http get offline_attempts
+assert offline_attempts.items ≠ []
+emit MaintainAccount { now = 110 } to this
+emit Posted to http get bounded_attempts
+assert bounded_attempts.items = offline_attempts.items
+emit Reply { body = "{\"_class\":\"Account\",\"email\":\"ada@example.test\",\"active\":true,\"verified\":true}" } to http
+emit Reply { body = "{\"_class\":\"SignedIn\",\"email\":\"ada@example.test\",\"token\":\"restored-token\",\"verified\":true}" } to http
+emit MaintainAccount { now = 131 } to this get restored_session
+assert restored_session ∈ SessionMaintained
+emit Reply { body = "{\"_class\":\"SignedIn\",\"email\":\"ada@example.test\",\"token\":\"refreshed-token\",\"verified\":true}" } to http
+emit MaintainAccount { now = 4000 } to this
+emit Ran to proc get refreshed_store
+stored_refresh = false
+leaked_refresh = false
+loop command over refreshed_store.items
+    if command.command = "/usr/bin/python3" and command.args[1] = "write"
+        emit Parse { text = command.stdin } to json get record
+        if record.value.token = "refreshed-token", stored_refresh = true
+    emit Includes { text = "$command.args", needle = "refreshed-token" } to this get in_argv
+    if in_argv.yes, leaked_refresh = true
+assert stored_refresh
+assert not leaked_refresh
+emit Reply { body = "{\"_class\":\"Denied\",\"reason\":\"expired\"}" } to http
+emit MaintainAccount { now = 8000 } to this get expired_session
+assert expired_session ∈ SessionRefused
+emit Ran to proc get expired_store
+removed_session = false
+loop command over expired_store.items
+    if command.command = "/usr/bin/python3" and command.args[1] = "remove", removed_session = true
+assert removed_session
+
+emit Respond { command = "/usr/bin/python3", arg = "remove", stdout = "", code = 1 } to proc
+emit SignOut { detail = "test storage failure" } to this get failed_signout
+assert failed_signout ∈ SignOutFailed
+emit Respond { command = "/usr/bin/python3", arg = "remove", stdout = "{}", code = 0 } to proc

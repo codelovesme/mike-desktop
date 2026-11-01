@@ -41,6 +41,15 @@ class CliTest(unittest.TestCase):
     def question(self):
         self.cli.turn = 't1'
         self.cli.render({'turn_id':'t1','stage':'confirm','confirmation_id':'q'*64,'say':'question','steps':[]})
+    def test_restoring_or_offline_service_does_not_request_a_fresh_login(self):
+        from unittest.mock import Mock
+        for state in ({'connection':'restoring'}, {'connection':'offline','chat_authenticated':True,'account':self.service.owner}):
+            self.service.attach = Mock(return_value=state)
+            cli = Terminal(self.service,'/project',True,self.out)
+            with self.assertRaises(ServiceError) as failure: cli.attach()
+            self.assertEqual(failure.exception.status,503)
+            self.assertNotEqual(failure.exception.error,'signed_out')
+
     def test_workspace_is_context_not_another_executor(self):
         self.cli.ask('run tests')
         self.assertEqual(self.service.calls[-1],('/v1/chat/ask',{'text':'run tests','workspace':'/project'}))
