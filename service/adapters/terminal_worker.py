@@ -74,6 +74,9 @@ def validate(request: object) -> tuple[list[str], str, int]:
         if not isinstance(limit, int) or isinstance(limit, bool) or not 64 <= limit <= MAX_OUTPUT:
             raise ValueError("report_bytes must be between 64 and 32768")
     argv, cwd, timeout = request["argv"], request["cwd"], request["timeout_seconds"]
+    # "~" is the person's home on this computer: Mike cannot know its path.
+    if isinstance(cwd, str) and (cwd == "~" or cwd.startswith("~/")):
+        cwd = os.path.expanduser("~") + cwd[1:]
     if not isinstance(argv, list) or not 1 <= len(argv) <= MAX_ARGV:
         raise ValueError("argv must contain 1 to 64 strings")
     if any(not isinstance(arg, str) or not arg or len(arg) > MAX_TEXT or "\x00" in arg for arg in argv):
