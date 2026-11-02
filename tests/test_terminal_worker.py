@@ -33,6 +33,14 @@ class TerminalWorkerTest(unittest.TestCase):
             self.assertFalse((Path(directory) / "injected").exists())
             self.assertEqual(invoke(["pwd"], directory)["stdout"].strip(), directory)
 
+    def test_tilde_is_this_computers_home(self):
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / "work").mkdir()
+            env = dict(os.environ, HOME=home)
+            self.assertEqual(invoke(["pwd"], "~", env=env)["stdout"].strip(), home)
+            self.assertEqual(invoke(["pwd"], "~/work", env=env)["stdout"].strip(), home + "/work")
+            self.assertEqual(invoke(["pwd"], "~nobody", env=env).get("state"), "rejected")
+
     def test_missing_timeout_and_output_limit_are_distinct(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(invoke(["absent-mike-test-command"], directory)["reason"], "command not found")

@@ -60,8 +60,8 @@ seen_tasks = []
 Capabilities =>
     | A server has no person at the screen to pick a folder or see a file.
     if headless
-        return DeviceCapabilities { items = ["terminal", "terminal_modes_v1"] }
-    return DeviceCapabilities { items = ["file_search", "file_open", "terminal", "terminal_modes_v1"] }
+        return DeviceCapabilities { items = ["terminal", "terminal_modes_v1", "terminal_home_v1"] }
+    return DeviceCapabilities { items = ["file_search", "file_open", "terminal", "terminal_modes_v1", "terminal_home_v1"] }
 
 | Only the fixed public service or an explicit loopback test host. No task
 | field ever becomes part of a URL.
