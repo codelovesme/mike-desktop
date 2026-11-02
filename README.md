@@ -129,6 +129,19 @@ of its rights, and the directory is only where they start. See
 Google sign-in uses the same external browser connection route when the
 identity provider is configured.
 
+### sudo
+
+A command that needs root reaches this computer as `sudo <command>` only
+after you said Yes to it in Mike — sudo is always asked, even in Auto mode.
+The service runs it as `sudo -n`, never waiting for a password, so it works
+only once your user may sudo without one:
+
+    echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/90-mike-nopasswd
+    sudo chmod 0440 /etc/sudoers.d/90-mike-nopasswd
+
+That rule is for your user, not only for Mike: every program you run can
+then become root without a password. Remove the file to take it back.
+
 ## Retired in 0.5
 
 The undocumented text-mode window (`MIKE_DESKTOP_TEXT_UI=1`) was the old

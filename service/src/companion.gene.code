@@ -60,8 +60,8 @@ seen_tasks = []
 Capabilities =>
     | A server has no person at the screen to pick a folder or see a file.
     if headless
-        return DeviceCapabilities { items = ["terminal", "terminal_modes_v1", "terminal_home_v1"] }
-    return DeviceCapabilities { items = ["file_search", "file_open", "terminal", "terminal_modes_v1", "terminal_home_v1"] }
+        return DeviceCapabilities { items = ["terminal", "terminal_modes_v1", "terminal_home_v1", "terminal_sudo_v1"] }
+    return DeviceCapabilities { items = ["file_search", "file_open", "terminal", "terminal_modes_v1", "terminal_home_v1", "terminal_sudo_v1"] }
 
 | Only the fixed public service or an explicit loopback test host. No task
 | field ever becomes part of a URL.
@@ -735,6 +735,10 @@ ReceiveWork { task } =>
             if user_id = "0"
                 emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "mode-based unattended commands are refused for root; run Mike as your ordinary user", outcome = "failed", detail = "" } to this
                 return WorkReceived
+            | sudo only after the person's yes in Mike (owner decision 2026-11-02).
+            if argv[0] = "sudo" and (task.approval_mode ≠ "ask" or task.confirmed ≠ true)
+                emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "sudo runs only after the person's yes in Mike; it did not run", outcome = "failed", detail = "" } to this
+                return WorkReceived
             emit Note { text = "Running under the person's selected " + task.approval_mode + " mode." } to this
             emit StartTerminal to this
             return WorkReceived
@@ -925,7 +929,9 @@ StartTerminal =>
     name = "step-" + spawned
     request_path = runtime_dir + "/" + name + ".request"
     result_path = runtime_dir + "/" + name + ".result"
-    emit Stringify { value = { argv = work.argv, cwd = work.cwd, timeout_seconds = work.timeout, report_bytes = 4096 } } to json get request
+    step = { argv = work.argv, cwd = work.cwd, timeout_seconds = work.timeout, report_bytes = 4096 }
+    if work.argv[0] = "sudo" and work.approval_mode = "ask", step = step + { privileged = true }
+    emit Stringify { value = step } to json get request
     emit WritePrivate { path = request_path, text = request.value } to this get wrote
     if wrote ∉ Written
         emit FinishWork { state = "failed", exit_code = null, stdout = "", stderr = "the local service could not prepare the command", outcome = "", detail = "" } to this

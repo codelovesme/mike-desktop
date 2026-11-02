@@ -67,7 +67,7 @@ def bounded_output(value: str, limit: int) -> str:
 
 def validate(request: object) -> tuple[list[str], str, int]:
     required = {"argv", "cwd", "timeout_seconds"}
-    if not isinstance(request, dict) or not required <= set(request) <= required | {"report_bytes"}:
+    if not isinstance(request, dict) or not required <= set(request) <= required | {"report_bytes", "privileged"}:
         raise ValueError("expected argv, cwd, and timeout_seconds")
     if "report_bytes" in request:
         limit = request["report_bytes"]
@@ -88,12 +88,24 @@ def validate(request: object) -> tuple[list[str], str, int]:
     return argv, cwd, timeout
 
 
+SUDO_HINT = ("\nsudo needs a password here: Mike's yes is meant to be the only gate, so add "
+             "a NOPASSWD rule for this user (see mike-service's README, \"sudo\").")
+
+
 def run(request: object) -> dict:
     global _child
     argv, cwd, timeout = validate(request)
+    # A sudo step the person confirmed in Mike (Ask, whatever the mode) runs
+    # with `sudo -n`: no password prompt, only this step may gain privilege.
+    privileged = request.get("privileged") is True
+    if privileged:
+        if argv[0] != "sudo" or len(argv) < 2 or argv[1].startswith("-"):
+            raise ValueError("a privileged step is sudo followed by the command, without sudo options")
+        argv = ["sudo", "-n", "--"] + argv[1:]
     if not os.path.isdir(cwd):
         return {"state": "failed", "reason": "working directory does not exist"}
-    _no_new_privileges()
+    if not privileged:
+        _no_new_privileges()
     begun = time.monotonic()
     output = bytearray()
     error = bytearray()
@@ -136,6 +148,8 @@ def run(request: object) -> dict:
                 break
         _child.wait()
 
+    if privileged and _child.returncode == 1 and b"password is required" in error:
+        error.extend(SUDO_HINT.encode())
     return {
         "state": state,
         "exit_code": _child.returncode if state == "completed" else None,

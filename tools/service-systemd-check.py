@@ -78,7 +78,7 @@ def main():
         unit_file = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd/user" / UNIT
         text = unit_file.read_text()
         assert f'ExecStart="{bundle}/mike-service" run' in text and "Restart=on-failure" in text, text
-        assert "NoNewPrivileges=yes" in text and "UMask=0077" in text and "RestartPreventExitStatus=1" in text, text
+        assert "NoNewPrivileges=yes" not in text and "UMask=0077" in text and "RestartPreventExitStatus=1" in text, text
         assert show("UnitFileState") in ("disabled", "linked", ""), show("UnitFileState")
         record("install", installed.stdout.strip().splitlines()[0])
 

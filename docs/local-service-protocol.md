@@ -366,7 +366,8 @@ mike-service uninstall-unit
 ```
 
 The unit runs `mike-service run` as the user (no root), with
-`NoNewPrivileges=yes`, `UMask=0077`, an optional
+`UMask=0077` (no `NoNewPrivileges`: a confirmed sudo step needs it, and every
+other terminal step sets no_new_privs itself), an optional
 `~/.config/mike-service/environment` (`MIKE_SERVICE_HOST_URL`,
 `MIKE_SERVICE_CODE_BIN`, …), `Restart=on-failure` after a crash, and
 `RestartPreventExitStatus=1` so a refused start (another instance, a

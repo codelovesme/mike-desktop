@@ -49,7 +49,8 @@ Restart=on-failure
 RestartPreventExitStatus=1
 RestartSec=5
 UMask=0077
-NoNewPrivileges=yes
+# No NoNewPrivileges: a sudo step the person confirmed in Mike needs it;
+# every other step sets no_new_privs itself (terminal_worker.py).
 
 [Install]
 WantedBy=default.target
