@@ -54,6 +54,38 @@ class CliTest(unittest.TestCase):
         self.cli.ask('run tests')
         self.assertEqual(self.service.calls[-1],('/v1/chat/ask',{'text':'run tests','workspace':'/project'}))
         self.assertEqual(self.cli.turn,'t1')
+    def test_conversations_list_open_continue_and_new(self):
+        listing = {'items':[{'id':'c-desk','title':'Fix the build','updated_at':1793570000,'turns':2,'devices':['local']},
+                            {'id':'c-web','title':'Weather','updated_at':1793560000,'turns':1,'devices':[]}],
+                   'has_more':False,'devices':[{'device_id':'local','name':'ds2','online':True}],'this_device':'local'}
+        history = {'conversation_id':'c-desk','turns':[{'text':'why is CI red','reply':'a missing module'}],'has_more':False}
+        def call(route, body):
+            self.service.calls.append((route, body))
+            if route.endswith('/conversations'): return listing
+            if route.endswith('/history'): return history
+            if route.endswith('/ask'): return {'turn_id':'t2','conversation_id':body.get('conversation_id') or 'c-new'}
+            return self.service.progress
+        self.service.call = call
+        with self.assertRaises(ValueError): self.cli.command('/conversations')  # an older service
+        self.cli.status['conversations'] = True
+        self.cli.command('/conversations')
+        self.assertEqual(self.service.calls[-1], ('/v1/chat/conversations', {'device':'this','limit':20}))
+        self.assertIn(' 1. Fix the build', self.out.getvalue())
+        self.assertIn('ds2', self.out.getvalue())
+        self.cli.command('/conversations all')
+        self.assertEqual(self.service.calls[-1][1]['device'], 'all')
+        self.cli.command('/open 1')
+        self.assertEqual(self.service.calls[-1], ('/v1/chat/history', {'conversation_id':'c-desk'}))
+        self.assertIn('You: why is CI red', self.out.getvalue())
+        self.assertIn('Mike: a missing module', self.out.getvalue())
+        self.cli.ask('and now?')
+        self.assertEqual(self.service.calls[-1][1]['conversation_id'], 'c-desk')
+        self.cli.finished = True
+        self.cli.command('/new')
+        self.cli.ask('something else')
+        self.assertEqual(self.service.calls[-1][1]['conversation_id'], '')
+        self.assertEqual(self.cli.conversation, 'c-new')
+        with self.assertRaises(ValueError): self.cli.command('/open 9')
     def test_active_turn_is_not_silently_replaced(self):
         self.cli.ask('first'); n=len(self.service.calls); self.cli.ask('second')
         self.assertEqual(len(self.service.calls),n)
