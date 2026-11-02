@@ -80,6 +80,7 @@ emit Respond { command = "pwd", arg = "", stdout = "/svc\n", code = 0 } to proc
 emit Respond { command = "sh", arg = "", stdout = "4242\n", code = 0 } to proc
 emit Respond { command = "uname", arg = "", stdout = "buildbox\n", code = 0 } to proc
 emit Respond { command = "cat", arg = "", stdout = "", code = 1 } to proc
+emit Respond { command = "test", arg = "", stdout = "", code = 1 } to proc
 emit StartService to this get started
 assert started ∈ ServiceStarted
 key = "aaaaaaaabbbbccccdddd00000000000111111111222233334444555555555555"
@@ -143,6 +144,10 @@ assert enrolled.value.paired
 assert enrolled.value.headless
 assert enrolled.value.account = "ada@example.test"
 assert enrolled.value.capabilities = ["terminal", "terminal_modes_v1", "terminal_home_v1"]
+| With mike-root and the server key in place, root steps are offered too.
+emit Respond { command = "test", arg = "/usr/local/libexec/mike-root", stdout = "", code = 0 } to proc
+emit Capabilities to this get rooted_offer
+assert rooted_offer.items = ["terminal", "terminal_modes_v1", "terminal_home_v1", "terminal_root_v1"]
 assert enrolled.value.enrollment.state = "confirmed"
 emit Stringify { value = enrolled.value } to json get enrolled_text
 emit Includes { text = enrolled_text.value, needle = secret } to this get leaked_after
