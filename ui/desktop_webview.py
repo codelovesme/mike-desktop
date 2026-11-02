@@ -94,6 +94,9 @@ class MikeWindow:
         self.service_down = False
         self.current_token = ""
         self.connecting_token = ""
+        self.importing_service_session = False
+        self.web_ready = False
+        self.shared_account_state = {}
         self.presented_approval = ""
         self.task_dialog_open = False
         self.request_running = False
@@ -233,6 +236,8 @@ class MikeWindow:
             return service.attach()
         if action == "attach":
             return service.attach(payload.get("token"), payload.get("connect", "none"))
+        if action == "account-session":
+            return service.call("/v1/account/desktop-session", {"host": self.origin})
         if action == "state":
             return service.state()
         if action == "claim":
@@ -405,7 +410,10 @@ class MikeWindow:
         return True
 
     def load_changed(self, _view, event) -> None:
+        if event == WebKit2.LoadEvent.STARTED:
+            self.web_ready = False
         if event == WebKit2.LoadEvent.FINISHED:
+            self.web_ready = True
             uri = self.web.get_uri() or ""
             if trusted_origin(uri, self.origin):
                 if self.signing_out:
@@ -433,7 +441,13 @@ class MikeWindow:
         return True
 
     def read_session(self) -> None:
+        if getattr(self, "importing_service_session", False):
+            return
         if self.signing_out or not self.attached:
+            return
+        shared = getattr(self, "shared_account_state", {})
+        if shared.get("chat_authenticated") and not self.current_token and not self.connecting_token:
+            self.adopt_service_account(shared)
             return
         uri = self.web.get_uri() or ""
         if not trusted_origin(uri, self.origin):
@@ -562,7 +576,7 @@ class MikeWindow:
                 return False
             self.observe(body)
             if not body.get("account") and self.current_token and not self.require_handoff:
-                # After a service restart the account session lives only here.
+                # Compatibility with older services that do not restore account sessions.
                 self.service_call("attach", {"token": self.current_token, "connect": "auto"},
                                   lambda s, b: self.observe(b) if s == 200 else False)
             return False
@@ -576,7 +590,7 @@ class MikeWindow:
         self.presented_approval = ""
         self.running_work = ""
         self.stop_button.set_sensitive(False)
-        if reason in ("signed_out", "device_revoked") or reason == "account_changed" and self.current_token:
+        if reason in ("signed_out", "device_revoked", "session_expired", "account_changed"):
             self.session_generation += 1
             self.current_token = ""
             self.connecting_token = ""
@@ -590,12 +604,38 @@ class MikeWindow:
             }.get(reason, "This computer's Mike service changed accounts. Connect Mike to continue."))
         self.reattach()
 
+    def adopt_service_account(self, state) -> None:
+        if not getattr(self, "web_ready", False):
+            return
+        if not state.get("chat_authenticated") or self.current_token or self.connecting_token or self.inserting_token or getattr(self, "importing_service_session", False):
+            return
+        self.importing_service_session = True
+        self.session_generation += 1
+        generation = self.session_generation
+
+        def received(status, body):
+            self.importing_service_session = False
+            if self.closed or generation != self.session_generation:
+                return False
+            if status != 200 or body.get("host") != self.origin or body.get("account") != state.get("account") or not body.get("token"):
+                return False
+            self.require_handoff = False
+            self.current_token = body["token"]
+            self.sign_out_button.set_sensitive(True)
+            self.install_web_token(self.current_token)
+            self.stack.set_visible_child_name("conversation")
+            return False
+
+        self.service_call("account-session", {}, received)
+
     def observe(self, state) -> bool:
         if not isinstance(state, dict) or self.closed:
             return False
         if state.get("host") and state["host"] != self.origin:
             self.set_status("The Mike service talks to " + str(state["host"]) + ", not this window's " + self.origin)
             return False
+        self.shared_account_state = state
+        self.adopt_service_account(state)
         self.show_activity(state.get("activity") or [])
         connection = state.get("connection")
         work = state.get("work")

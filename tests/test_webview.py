@@ -69,6 +69,8 @@ def bare_window(origin=NavigationTest.ORIGIN):
     window.closed = False
     window.session_generation = 0
     window.inserting_token = False
+    window.web_ready = True
+    window.shared_account_state = {}
     window.handoff_loaded = False
     window.handoff_marker = ""
     window.require_handoff = False
@@ -101,6 +103,38 @@ def page_token(token, uri=NavigationTest.ORIGIN + "/desktop/mike"):
 
 
 class ServiceClientWindowTest(unittest.TestCase):
+    def test_service_account_waits_for_a_loaded_web_origin(self):
+        window = bare_window()
+        window.web_ready = False
+        state = {'host':window.origin,'account':'ada@example.test','chat_authenticated':True}
+        window.observe(state)
+        window.read_session()
+        window.service_call.assert_not_called()
+        window.web.run_javascript.assert_not_called()
+        window.web_ready = True
+        window.read_session()
+        self.assertEqual(window.service_call.call_args.args[0], 'account-session')
+
+    def test_desktop_adopts_cli_login_without_another_browser_signin(self):
+        window = bare_window()
+        window.observe({'host':window.origin,'account':'ada@example.test','chat_authenticated':True,'connection':'connected'})
+        action, payload, callback = window.service_call.call_args.args
+        self.assertEqual(action, 'account-session')
+        window.read_session()
+        window.web.run_javascript.assert_not_called()
+        callback(200, {'host':window.origin,'account':'ada@example.test','token':'shared-token'})
+        window.install_web_token.assert_called_once_with('shared-token')
+        self.assertEqual(window.current_token,'shared-token')
+
+    def test_stale_service_handoff_cannot_restore_a_signed_out_account(self):
+        window = bare_window()
+        window.observe({'host':window.origin,'account':'ada@example.test','chat_authenticated':True})
+        callback = window.service_call.call_args.args[2]
+        window.session_generation += 1
+        callback(200, {'host':window.origin,'account':'ada@example.test','token':'stale-token'})
+        self.assertEqual(window.current_token,'')
+        window.install_web_token.assert_not_called()
+
     def test_old_webview_session_cannot_replace_browser_handoff(self):
         window = bare_window()
         window.inserting_token = True

@@ -77,7 +77,7 @@ def stage_service(stage: Path, version: str) -> None:
         shutil.copy2(path, staged / f"{module}.so")
     client = stage / "client"
     client.mkdir()
-    for name in ("mike_service.py", "service_control.py"):
+    for name in ("mike_service.py", "service_control.py", "images.py"):
         shutil.copy2(ROOT / "client" / name, client / name)
     docs = stage / "docs"
     docs.mkdir(exist_ok=True)
@@ -119,7 +119,7 @@ def main():
     if cli_only:
         stage = fresh(out, f"mike-cli-{version}-x86_64-linux")
         (stage / "client").mkdir()
-        for name in ("mike_service.py", "sign_in.py", "cli.py"):
+        for name in ("mike_service.py", "sign_in.py", "cli.py", "screen.py", "voice_audio.py", "ide_context.py", "images.py"):
             shutil.copy2(ROOT / "client" / name, stage / "client" / name)
         shutil.copy2(ROOT / "bin/mike-cli", stage / "mike-cli")
         shutil.copy2(ROOT / "docs/cli.md", stage / "README.md")

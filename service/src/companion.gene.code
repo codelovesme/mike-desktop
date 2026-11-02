@@ -31,6 +31,9 @@ spawned = 0
 
 account_email = ""
 account_token = ""
+account_restore = null
+account_retry_at = 0
+account_refresh_at = 0
 device_id = ""
 credential = ""
 connection = "signed_out"
@@ -43,6 +46,7 @@ decided = []
 recovery = null
 device_refused = false
 sessions = []
+readings = []
 turns = []
 session_serial = 0
 | Headless (ticket 160): a server enrolled with a code the person confirmed
@@ -56,8 +60,8 @@ seen_tasks = []
 Capabilities =>
     | A server has no person at the screen to pick a folder or see a file.
     if headless
-        return DeviceCapabilities { items = ["terminal"] }
-    return DeviceCapabilities { items = ["file_search", "file_open", "terminal"] }
+        return DeviceCapabilities { items = ["terminal", "terminal_modes_v1"] }
+    return DeviceCapabilities { items = ["file_search", "file_open", "terminal", "terminal_modes_v1"] }
 
 | Only the fixed public service or an explicit loopback test host. No task
 | field ever becomes part of a URL.
@@ -252,7 +256,7 @@ StartService =>
         emit Notice { fatal = true, text = "not started: no random source for the client key" } to this
         return NotConfigured { reason = "no random source" }
     client_key = key.value
-    emit Config { host = "127.0.0.1", port = 0, max_body_bytes = 4194304, response_timeout_seconds = 40 } to local get set
+    emit Config { host = "127.0.0.1", port = 0, max_body_bytes = 8388608, response_timeout_seconds = 40 } to local get set
     if set ∈ Exception or not set.ok
         emit Notice { fatal = true, text = "not started: the local listener could not be configured" } to this
         return NotConfigured { reason = "listener" }
@@ -277,8 +281,10 @@ StartService =>
     if was_revoked ∈ ReadText
         revoked_latch = true
         connection = "revoked"
+        emit ForgetAccountSession to this
     if not revoked_latch
         emit LoadHeadless to this
+        emit LoadAccountSession to this
     running = true
     emit Notice { text = "ready for local clients on 127.0.0.1:" + listen_port + " (protocol " + protocol_version + ", host " + host_url + ")" } to this
     return ServiceStarted
@@ -316,6 +322,100 @@ AccountFor { token } =>
     if account ∉ Account or account.active ≠ true or account.verified ≠ true or account.email ∉ String
         return NoAccount
     return account
+
+| ---- One persisted account for every local UI, independent of windows ----
+
+AccountStore { action, value } =>
+    input = ""
+    if action = "write"
+        emit Stringify { value = value } to json get encoded
+        input = encoded.value
+    emit Run { command = "/usr/bin/python3", args = [adapters_dir + "/account_session.py", action, state_dir], stdin = input } to proc get stored
+    if stored ∈ Exception or not stored.success, return SessionStoreFailed
+    if action ≠ "read", return SessionStored
+    emit Parse { text = stored.stdout } to json get parsed
+    if parsed ∈ Exception or parsed.value ∉ Object, return SessionStoreFailed
+    return SessionRecord { value = parsed.value }
+
+SaveAccountSession =>
+    if account_token = "" or account_email = "" or credential = "", return SessionStoreFailed
+    emit AccountStore { action = "write", value = { version = 1, host = host_url, owner = account_email, device_id = device_id, token = account_token } } to this get saved
+    return saved
+
+ForgetAccountSession =>
+    account_restore = null
+    account_retry_at = 0
+    account_refresh_at = 0
+    emit AccountStore { action = "remove", value = null } to this get removed
+    return removed
+
+LoadAccountSession =>
+    emit AccountStore { action = "read", value = null } to this get loaded
+    if loaded ∉ SessionRecord, return NoSavedSession
+    saved = loaded.value
+    if saved.version ≠ 1 or saved.host ≠ host_url or saved.owner ∉ String or saved.token ∉ String or saved.token = ""
+        return NoSavedSession
+    emit LoadIdentity { owner = saved.owner } to this get identity
+    if identity ∉ SavedIdentity or identity.device_id ≠ saved.device_id
+        return NoSavedSession
+    if headless and account_email ≠ saved.owner, return NoSavedSession
+    account_restore = saved
+    account_retry_at = 0
+    connection = "restoring"
+    return SessionQueued
+
+MaintainAccount { now } =>
+    if account_restore ≠ null
+        if now < account_retry_at, return SessionWaiting
+        account_retry_at = now + 30
+        saved = account_restore
+        emit ApiCall { app = "auth", particle = Impulse { token = saved.token, particle = Me } } to this get checked
+        if checked ∈ ApiUnavailable or checked ∈ Unavailable, return SessionWaiting
+        if checked ∉ Account or checked.email ≠ saved.owner or checked.active ≠ true or checked.verified ≠ true
+            emit ExpireAccount to this
+            return SessionRefused
+        emit LoadIdentity { owner = saved.owner } to this get identity
+        if identity ∉ SavedIdentity or identity.device_id ≠ saved.device_id
+            emit ExpireAccount to this
+            return SessionRefused
+        account_email = saved.owner
+        account_token = saved.token
+        device_id = identity.device_id
+        credential = identity.credential
+        emit LoadDeviceLedger to this
+        account_restore = null
+        account_refresh_at = now
+        connection = "offline"
+        emit Notice { text = "restored the saved account; reconnecting this device without a UI" } to this
+    if account_token = "" or now < account_refresh_at, return SessionMaintained
+    account_refresh_at = now + 60
+    emit ApiCall { app = "auth", particle = Impulse { token = account_token, particle = RefreshToken } } to this get refreshed
+    if refreshed ∈ ApiUnavailable or refreshed ∈ Unavailable, return SessionWaiting
+    if refreshed ∉ SignedIn or refreshed.email ≠ account_email or refreshed.verified ≠ true or refreshed.token ∉ String or refreshed.token = ""
+        emit ExpireAccount to this
+        return SessionRefused
+    account_token = refreshed.token
+    emit SaveAccountSession to this get saved
+    if saved ∈ SessionStored, account_refresh_at = now + 3600
+    return SessionMaintained
+
+ExpireAccount =>
+    emit EndGeneration { reason = "session_expired", detail = "the account session needs a fresh sign-in", can_report = false } to this
+    emit ClearAccount to this
+    connection = "session_expired"
+    emit Notice { text = "account session refused; sign in again to resume chat" } to this
+    return SessionExpired
+
+| Desktop's embedded authenticated web page needs an explicit handoff; normal
+| state/attach and CLI responses still never contain the account token.
+DesktopAccountSession { session, request } =>
+    if session.client ≠ "desktop" or not session.approvals or request.host ≠ host_url
+        emit Fail { status = 403, error = "desktop_required", message = "this handoff belongs to the local Desktop and its configured host" } to this get denied
+        return denied
+    if account_token = "" or account_restore ≠ null
+        emit Fail { status = 409, error = "signed_out", message = "sign in to this service first" } to this get missing
+        return missing
+    return Answer { status = 200, value = { token = account_token, account = account_email, host = host_url } }
 
 | ---- The pairing, kept private to this service ----
 
@@ -466,6 +566,7 @@ ConnectAccount { token, email } =>
     return Connected
 
 ClearAccount =>
+    emit ForgetAccountSession to this
     account_token = ""
     if headless
         return Cleared
@@ -484,6 +585,7 @@ ClearAccount =>
 EndGeneration { reason, detail, can_report } =>
     emit AbandonWork { detail = detail, can_report = can_report } to this
     generation += 1
+    readings = []
     ended_reason = reason
     activity = []
     decided = []
@@ -507,6 +609,7 @@ LoseDevice { detail } =>
 ServiceTick =>
     emit Timestamp to core get now
     emit ExpireSessions { now = now.value } to this
+    emit MaintainAccount { now = now.value } to this
     if credential ≠ "" and (account_token ≠ "" or headless)
         emit Pulse to this
     if enrollment ≠ null
@@ -526,8 +629,7 @@ Pulse =>
         emit LoseDevice { detail = "this computer's access was revoked" } to this
         return Revoked
     if pulse ∈ Denied
-        | The account session expired; a client must attach with a fresh one.
-        connection = "session_expired"
+        emit ExpireAccount to this
         return Offline
     if pulse ∉ DeviceOnline
         connection = "offline"
@@ -602,6 +704,7 @@ ReceiveWork { task } =>
         report = null
         report_until = now.value + 290
         grant_id = grant_id
+        approval_mode = task.approval_mode
         timeout = 60
     }
     emit MarkInflight { stage = "claimed" } to this
@@ -614,10 +717,26 @@ ReceiveWork { task } =>
     if repeated.yes
         emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "this step was delivered again; this computer already received it once and does not repeat it", outcome = "failed", detail = "this task was delivered again; it is not repeated" } to this
         return WorkReceived
+    if task.device_id ≠ device_id
+        emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "this task belongs to another device; it did not run", outcome = "failed", detail = "wrong device" } to this
+        return WorkReceived
     if kind = "terminal"
         valid = argv ∈ Array and argv ≠ [] and cwd ∈ String and cwd ≠ ""
         if not valid
             emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "the step had no valid command", outcome = "failed", detail = "" } to this
+            return WorkReceived
+        if task.approval_mode ≠ null
+            if task.approval_mode ≠ "auto" and task.approval_mode ≠ "ask"
+                emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "unknown terminal mode; it did not run", outcome = "failed", detail = "" } to this
+                return WorkReceived
+            if task.approval_mode = "ask" and task.confirmed ≠ true
+                emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "Ask mode has no confirmed owner answer; it did not run", outcome = "failed", detail = "" } to this
+                return WorkReceived
+            if user_id = "0"
+                emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "mode-based unattended commands are refused for root; run Mike as your ordinary user", outcome = "failed", detail = "" } to this
+                return WorkReceived
+            emit Note { text = "Running under the person's selected " + task.approval_mode + " mode." } to this
+            emit StartTerminal to this
             return WorkReceived
         if grant_id ≠ ""
             emit GrantCheck { grant_id = grant_id, argv = argv, cwd = cwd, confirmed = task.confirmed = true } to this get allowed
@@ -1001,8 +1120,14 @@ Route { method, path, body, headers } =>
     if path = "/v1/work/stop"
         emit StopWork { session = session, request = request } to this get stopping
         return stopping
+    if path = "/v1/account/desktop-session"
+        emit DesktopAccountSession { session = session, request = request } to this get handoff
+        return handoff
     if path = "/v1/signout"
-        emit SignOut { detail = "signed out on this computer" } to this
+        emit SignOut { detail = "signed out on this computer" } to this get ended
+        if ended ∉ SignedOut
+            emit Fail { status = 503, error = "session_not_removed", message = "the saved login could not be removed; sign-out did not complete" } to this get blocked
+            return blocked
         return Answer { status = 200, value = { signed_out = true } }
     if path = "/v1/device/revoke"
         emit RevokeThisDevice to this get revoked
@@ -1019,12 +1144,27 @@ Route { method, path, body, headers } =>
     if path = "/v1/editor/result" or path = "/v1/editor/close"
         emit EditorRelay { session = session, request = request, close = path = "/v1/editor/close" } to this get relayed
         return relayed
+    if path = "/v1/chat/settings"
+        emit ChatSettings { session = session } to this get settings
+        return settings
     if path = "/v1/chat/ask"
         emit ChatAsk { session = session, request = request } to this get asked
         return asked
     if path = "/v1/chat/hear"
         emit ChatHear { request = request } to this get heard
         return heard
+    if path = "/v1/chat/read"
+        emit ChatRead { session = session, request = request } to this get reading
+        return reading
+    if path = "/v1/chat/spoken"
+        emit ChatSpoken { session = session, request = request } to this get spoken
+        return spoken
+    if path = "/v1/chat/conversations"
+        emit ChatConversations { request = request } to this get conversations
+        return conversations
+    if path = "/v1/chat/history"
+        emit ChatHistory { request = request } to this get history
+        return history
     if path = "/v1/chat/resume"
         emit ChatResume { session = session, request = request } to this get resumed
         return resumed
@@ -1099,6 +1239,10 @@ Attach { request } =>
     if mode ≠ "none" and mode ≠ "auto" and mode ≠ "switch"
         emit Fail { status = 400, error = "bad_request", message = "connect must be none, auto or switch" } to this get bad_mode
         return bad_mode
+    if mode = "none" and account_restore ≠ null
+        emit Timestamp to core get restoring_at
+        emit MaintainAccount { now = restoring_at.value } to this
+        if account_token ≠ "", emit Pulse to this
     if mode ≠ "none"
         if request.token ∉ String or request.token = ""
             emit Fail { status = 400, error = "token_required", message = "connecting needs the account's session token" } to this get no_token
@@ -1107,6 +1251,12 @@ Attach { request } =>
         if account ∉ Account
             emit Fail { status = 401, error = "account_refused", message = "the account session was refused" } to this get refused
             return refused
+        if account_restore ≠ null and account_restore.owner ≠ account.email
+            if mode ≠ "switch"
+                emit Fail { status = 409, error = "account_mismatch", message = "the saved service login belongs to another account; switch explicitly" } to this get saved_mismatch
+                return saved_mismatch
+            emit EndGeneration { reason = "account_changed", detail = "the saved account on this computer changed", can_report = false } to this
+            emit ClearAccount to this
         same = account_email = account.email and credential ≠ ""
         if same, account_token = request.token
         if not same
@@ -1132,6 +1282,14 @@ Attach { request } =>
                 return unavailable
             revoked_latch = false
             emit Run { command = "rm", args = ["-f", "--", state_dir + "/revoked"] } to proc
+    if mode ≠ "none"
+        account_restore = null
+        emit SaveAccountSession to this get saved_session
+        if saved_session ∉ SessionStored
+            emit Fail { status = 503, error = "session_not_saved", message = "the account is connected but its private session could not be saved; retry sign-in" } to this get unsaved
+            return unsaved
+        emit Timestamp to core get connected_at
+        account_refresh_at = connected_at.value + 3600
     emit Length { value = sessions } to core get open_sessions
     if open_sessions.value ≥ 16
         emit Fail { status = 429, error = "too_many_clients", message = "too many local clients are attached" } to this get crowded
@@ -1142,7 +1300,10 @@ Attach { request } =>
         return no_secret
     emit Timestamp to core get now
     session_serial += 1
-    session = { id = "s" + session_serial, token = secret.value, client = client, approvals = approvals, seen = now.value, generation = generation }
+    session = { id = "s" + session_serial, token = secret.value, client = client, approvals = approvals, seen = now.value, generation = generation, model = "", thinking = "off", mode = "ask" }
+    if account_token ≠ ""
+        emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = ModelSettings } } to this get model_settings
+        if model_settings ∈ ModelSettings, session = session + { model = model_settings.default_model }
     sessions += [session]
     emit StateFor { session = session } to this get state
     return Answer { status = 200, value = { protocol = protocol_version, service = service_version, session_id = session.id, session_token = secret.value, generation = generation, state = state.value } }
@@ -1167,7 +1328,7 @@ StateFor { session } =>
         approval_id = ""
         awaiting = work.stage = "awaiting_approval" or work.stage = "file_confirm"
         if session.approvals and awaiting, approval_id = work.approval_id
-        view = { id = work.id, kind = work.kind, stage = work.stage, claim = claim, approval_id = approval_id, argv = work.argv, cwd = work.cwd, goal = work.goal, folder = work.folder, file = work.file, seconds_left = work.deadline - now.value }
+        view = { id = work.id, kind = work.kind, approval_mode = work.approval_mode, stage = work.stage, claim = claim, approval_id = approval_id, argv = work.argv, cwd = work.cwd, goal = work.goal, folder = work.folder, file = work.file, seconds_left = work.deadline - now.value }
     emit Capabilities to this get offered
     enrollment_view = null
     if enrollment ≠ null
@@ -1185,8 +1346,14 @@ StateFor { session } =>
         account = account_email
         device_id = device_id
         editor_version = 1
-        chat_version = 1
+        chat_version = 2
+        conversations = true
+        voice_chat = true
+        model = session.model
+        thinking = session.thinking
+        mode = session.mode
         connection = connection
+        chat_authenticated = account_token ≠ ""
         paired = credential ≠ ""
         capabilities = offered.items
         clients = clients
@@ -1298,6 +1465,8 @@ StopWork { session, request } =>
 | The saved pairing stays private on disk, so signing in again as the same
 | account reuses this device rather than pairing another.
 SignOut { detail } =>
+    emit ForgetAccountSession to this get forgotten
+    if forgotten ∉ SessionStored, return SignOutFailed
     emit EndGeneration { reason = "signed_out", detail = detail, can_report = true } to this
     emit ClearAccount to this
     connection = "signed_out"
@@ -1345,6 +1514,12 @@ ForgetTurns =>
     turns = []
     return Forgotten
 
+ChatSettings { session } =>
+    if account_token = "", return Answer { status = 409, value = { error = "signed_out", message = "connect an account first" } }
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = ModelSettings } } to this get settings
+    if settings ∉ ModelSettings, return Answer { status = 503, value = { error = "settings_unavailable", message = "Mike's model settings are unavailable" } }
+    return Answer { status = 200, value = settings }
+
 ChatAsk { session, request } =>
     if account_token = ""
         emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
@@ -1352,6 +1527,11 @@ ChatAsk { session, request } =>
     if request.text ∉ String or request.text = ""
         emit Fail { status = 400, error = "bad_request", message = "text is required" } to this get empty
         return empty
+    if request.images ≠ null
+        emit Stringify { value = request.images } to json get encoded_images
+        emit Run { command = "/usr/bin/python3", args = [adapters_dir + "/validate_images.py"], stdin = encoded_images.value } to proc get checked
+        if checked ∈ Exception or not checked.success
+            return Answer { status = 400, value = { error = "invalid_images", message = "use at most three PNG/JPEG images, 2 MiB each and 4 MiB total" } }
     workspace = ""
     if request.workspace ∈ String
         emit Length { value = request.workspace } to core get size
@@ -1377,12 +1557,61 @@ ChatAsk { session, request } =>
             emit Fail { status = 503, error = "no_random_source", message = "could not bind editor" } to this get no_binding
             return no_binding
         editor = { binding = binding.value, mode = mode, workspace = workspace, context = request.editor.context }
-    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text, device_id = device_id, workspace = workspace, editor = editor } } } to this get started
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text, conversation_id = request.conversation_id, device_id = device_id, workspace = workspace, editor = editor, model = request.model, thinking = request.thinking, mode = request.mode, images = request.images } } } to this get started
     if started ∉ Thinking
-        emit Fail { status = 503, error = "mike_unavailable", message = "Mike did not start the turn" } to this get unavailable
+        reason = "Mike did not start the turn"
+        if started.reason ∈ String, reason = started.reason
+        emit Fail { status = 400, error = "turn_rejected", message = reason } to this get unavailable
         return unavailable
+    selected_sessions = []
+    loop one over sessions
+        if one.id = session.id, one = one + { model = request.model, thinking = request.thinking, mode = request.mode }
+        selected_sessions += [one]
+    sessions = selected_sessions
     emit RememberChat { turn_id = started.turn_id, session = session.id, editor = editor } to this
-    return Answer { status = 200, value = { turn_id = started.turn_id } }
+    return Answer { status = 200, value = { turn_id = started.turn_id, conversation_id = started.conversation_id } }
+
+| The person's conversations with Mike, the same list Mike's pages show:
+| `device = "this"` narrows it to the ones this computer took part in.
+| Device names come along so a client can say where each one happened.
+ChatConversations { request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
+        return out
+    filter = ""
+    if request.device = "this", filter = device_id
+    if request.device ∈ String and request.device ≠ "this" and request.device ≠ "all", filter = request.device
+    limit = 20
+    if request.limit ∈ Number and request.limit > 0 and request.limit < 101, limit = request.limit
+    skip = 0
+    if request.skip ∈ Number and request.skip ≥ 0, skip = request.skip
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Conversations { device_id = filter, limit = limit, skip = skip } } } to this get listed
+    if listed ∉ ConversationList or not listed.ok
+        emit Fail { status = 503, error = "mike_unavailable", message = "Mike's conversations are unavailable" } to this get unavailable
+        return unavailable
+    named = []
+    emit Gateway { particle = MyDevices } to this get mine
+    if mine ∈ Devices
+        loop one over mine.items
+            named += [{ device_id = one.device_id, name = one.name, online = one.online = true }]
+    return Answer { status = 200, value = { items = listed.items, has_more = listed.has_more, devices = named, this_device = device_id } }
+
+| One conversation's turns, oldest first, to show before continuing it.
+ChatHistory { request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
+        return out
+    if request.conversation_id ∉ String or request.conversation_id = ""
+        emit Fail { status = 400, error = "bad_request", message = "conversation_id is required" } to this get empty
+        return empty
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = RecentConversation { conversation_id = request.conversation_id, limit = 50, skip = 0 } } } to this get recent
+    if recent ∉ Recent or not recent.ok
+        emit Fail { status = 503, error = "mike_unavailable", message = "Mike's history is unavailable" } to this get unavailable
+        return unavailable
+    shown = []
+    loop one over recent.turns
+        shown += [{ text = one.text, reply = one.reply }]
+    return Answer { status = 200, value = { conversation_id = request.conversation_id, turns = shown, has_more = recent.has_more } }
 
 | A recording, as words: Mike's `Hear`, the same road a spoken question
 | takes from Mike's own pages. Nothing is kept here; the words go back to
@@ -1406,6 +1635,48 @@ ChatHear { request } =>
         emit Fail { status = 503, error = "mike_unavailable", message = "Mike could not make out the recording" } to this get unavailable
         return unavailable
     return Answer { status = 200, value = { text = heard.text } }
+
+| Speech uses the same account-authenticated central API as the browser.
+| Reading receipts belong to the requesting local session and generation.
+ChatRead { session, request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get denied
+        return denied
+    if request.text ∉ String or request.text = ""
+        emit Fail { status = 400, error = "bad_request", message = "text is required" } to this get empty
+        return empty
+    emit Length { value = request.text } to core get size
+    if size.value > 16384
+        emit Fail { status = 413, error = "too_large", message = "speech text exceeds 16 KiB" } to this get long
+        return long
+    started_generation = generation
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Read { text = request.text } } } to this get reading
+    if generation ≠ started_generation or reading ∉ Speaking or reading.reading_id ∉ String
+        emit Fail { status = 503, error = "speech_unavailable", message = "Mike could not start speech" } to this get failed
+        return failed
+    readings += [{ id = reading.reading_id, session = session.id, generation = generation }]
+    emit Length { value = readings } to core get many
+    if many.value > 64, readings = readings[many.value - 64, length)
+    return Answer { status = 200, value = { reading_id = reading.reading_id } }
+
+ChatSpoken { session, request } =>
+    owned = false
+    loop reading over readings
+        if reading.id = request.reading_id and reading.session = session.id and reading.generation = generation, owned = true
+    if not owned or account_token = ""
+        emit Fail { status = 403, error = "not_owned", message = "that reading belongs to another session" } to this get denied
+        return denied
+    started_generation = generation
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Spoken { reading_id = request.reading_id } } } to this get speech
+    if generation ≠ started_generation or speech ∉ Speech
+        emit Fail { status = 503, error = "speech_unavailable", message = "Mike's speech is unavailable" } to this get failed
+        return failed
+    if speech.stage ≠ "speaking"
+        keep = []
+        loop reading over readings
+            if reading.id ≠ request.reading_id, keep += [reading]
+        readings = keep
+    return Answer { status = 200, value = { stage = speech.stage, audio_base64 = speech.audio_base64, format = speech.format, reason = speech.reason } }
 
 | Session bindings are a bounded working set, not another chat database.
 RememberChat { turn_id, session, editor } =>
@@ -1483,7 +1754,7 @@ ChatView { session, turn, id } =>
     editor_request = null
     loop one over turns
         if one.turn_id = id and one.session = session.id and one.editor ∈ Object, editor_request = turn.editor_request
-    return Answer { status = 200, value = { turn_id = id, stage = turn.stage, reply = reply, say = say, confirmation_id = nonce, steps = steps, work_id = work_id, editor_request = editor_request } }
+    return Answer { status = 200, value = { turn_id = id, stage = turn.stage, reply = reply, say = say, confirmation_id = nonce, steps = steps, work_id = work_id, editor_request = editor_request, model = turn.model, thinking = turn.thinking, mode = turn.mode } }
 
 ChatConfirm { session, request } =>
     emit OwnTurn { session = session, turn_id = request.turn_id } to this get owned
@@ -1538,6 +1809,11 @@ LoadHeadless =>
     device_id = saved.device_id
     credential = saved.credential
     connection = "offline"
+    emit LoadDeviceLedger to this
+    emit Notice { text = "headless device loaded; it runs only what its grants cover" } to this
+    return HeadlessLoaded
+
+LoadDeviceLedger =>
     emit ReadPrivate { path = state_dir + "/grants" } to this get saved_grants
     if saved_grants ∈ ReadText
         emit Parse { text = saved_grants.text } to json get parsed
@@ -1546,8 +1822,7 @@ LoadHeadless =>
     if saved_seen ∈ ReadText
         emit Parse { text = saved_seen.text } to json get parsed_seen
         if parsed_seen ∉ Exception and parsed_seen.value ∈ Array, seen_tasks = parsed_seen.value
-    emit Notice { text = "headless device loaded; it runs only what its grants cover" } to this
-    return HeadlessLoaded
+    return DeviceLedgerLoaded
 
 StartEnrollment { session, request } =>
     if not session.approvals

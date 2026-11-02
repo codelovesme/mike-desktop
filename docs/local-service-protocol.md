@@ -80,7 +80,13 @@ are dropped, and every session of the old generation answers **409
 `device_revoked`) to its next request. The client clears what it showed and
 attaches again. No client can see the previous owner's results.
 
-The account token and the device credential are never returned to a client.
+The device credential is never returned to a client. Normal state/attach and
+CLI routes never return the account token. Desktop alone explicitly requests
+`POST /v1/account/desktop-session` with its matching `host` through an attached
+`desktop`, approval-capable session, to initialize the embedded authenticated
+web page from the shared service login. The existing browser-request rejection,
+private endpoint/key and account-generation checks apply; a client label is not
+a security boundary against another process of the same OS user.
 
 ## Routes
 
@@ -99,6 +105,7 @@ The account token and the device credential are never returned to a client.
 | `POST /v1/chat/resume` | `turn_id` | same as progress, after central ownership check |
 | `POST /v1/chat/confirm` | `turn_id`, `yes`, `confirmation_id` | `{sent:bool}` |
 | `POST /v1/chat/hear` | `audio_base64` (≤4,000,000 chars, about a minute of 16 kHz mono WAV), `format`: `wav`\|`webm` | `{text}` — Mike's `Hear`; nothing is kept or asked |
+| `POST /v1/account/desktop-session` | `host` equal to service host; Desktop session only | `{token, account, host}` for the embedded page only |
 | `POST /v1/enroll/start` (control) | `account`, `name`? | `{user_code, expires_in, name, account}` |
 | `POST /v1/grants/add` (control) | `root`, `run`, `ask`, `minutes`?, `timeout_seconds`? | `{grant}` |
 | `POST /v1/grants/revoke` (control) | `grant_id` | `{revoked:true}` |
@@ -316,19 +323,39 @@ back; only an explicit `connect=switch` pairs it again, as a new device.
 | `attach … connect=switch` to another account | stopped, reported to the old account | reported to the old account | other account's pairing used/created | all end (`account_changed`) |
 | Revoked on the website (heartbeat refused) | stopped; gateway reports `unknown` | dropped; gateway reports revoked | deleted; revocation remembered across restarts | all end (`device_revoked`) |
 | `device/revoke` from a client | stopped, reported, then revoked | reported, then revoked | revoked at the gateway, deleted; revocation remembered | all end (`device_revoked`) |
-| Service stopped (`systemctl --user stop`) | killed with the unit's cgroup; reported `failed`/unknown after restart | reported not run after restart | kept | gone; account token gone |
+| Service stopped (`systemctl --user stop`) | killed with the unit's cgroup; reported `failed`/unknown after restart | reported not run after restart | kept | gone; saved account restored after validation |
 | Service crash / kill | killed with the unit's cgroup (outside systemd the worker's own time limit still applies); reported `failed`/unknown after restart | reported not run after restart | kept | gone |
 | Grant revoked (Mike or `grant revoke`) | a command under it is stopped (`cancelled`) | an `ask` step under it can no longer be answered | kept | kept |
 | Grant expires | finishes within its bound | lapses | kept | kept |
 | Network lost (headless) | continues within its bound; result retried until the step expires | waits at the gateway | kept | kept |
 
-The account token lives only in the service's memory. After a restart the
-pairing is still on disk but the service is signed out until a client
-attaches with `connect=auto` (Desktop does this from its web session). A
-task that was claimed when the service stopped is then reported once:
-`cancelled`/"did not run" if it had not been approved, `failed`/"whether
-it finished is unknown" if its effect had begun. Nothing is replayed, and
-no checkpoint or resumption exists.
+The account session is now stored in `account-session.json`, bound to the
+configured backend, verified owner and saved device ID. The state directory is
+0700; the file must be this user's regular 0600 file, never a symlink. Writes use
+an exclusive random sibling, fsync and atomic replacement; secrets travel on
+stdin, not process arguments, and errors omit their contents. Storage failures
+are reported rather than claiming a persistent login or successful sign-out.
+
+On restart the service loads the existing pairing and validates the saved account
+with auth `Me`; it does not pair another device or need an attached UI. During
+backend outages it reports `restoring` and retries every 30 seconds while keeping
+the saved record. On success it resumes heartbeat/task receipt; `chat_authenticated`
+in state distinguishes a usable account session from headless enrollment alone.
+Valid account tokens refresh hourly through `RefreshToken`, with bounded retries
+on outage. Refused/deactivated/expired accounts discard the cached session and
+end the old client generation. This does not create a new long-lived refresh-token
+protocol: a token already expired while the service was stopped requires login.
+
+Sign-out removes the saved account, as do account refusal and device revocation.
+Explicit switching ends the previous generation before writing the new account.
+The saved headless device identity and its existing grants remain separate;
+enrollment alone still does not supply account chat credentials. A signed-in
+account on that same headless service can now be restored as well. UI detach
+never clears the shared account. No window does not authorize a local command.
+
+A task claimed when the service stopped is reported after reconnect: cancelled
+if it had not been approved, failed/unknown if its effect had begun. Nothing is
+replayed and no command checkpoint/resumption is introduced.
 
 ## systemd user unit
 
@@ -410,3 +437,50 @@ The IDE owns buffer revisions, diff approval, save status and undo; this
 service does not duplicate its editor implementation. Existing machine
 tool grants/approvals still apply independently. See the IDE repository's
 `docs/mike.md` for supported editor tools and real integration evidence.
+
+## Chat protocol 2: per-turn controls and images
+
+Local protocol remains 1; state.chat_version is 2. POST /v1/chat/settings
+requires the current attached account and returns Mike's authenticated
+ModelSettings catalogue. POST /v1/chat/ask accepts optional model, thinking,
+mode and images in addition to text/workspace; the central API is authoritative
+for model/capability choices. The local listener accepts at most 8 MiB total;
+images are bounded to three PNG/JPEGs, 2 MiB each and 4 MiB decoded total and
+validated before forwarding. The API repeats a full bounded image decode.
+State and turn progress report model/thinking/mode; progress is still polled
+and final reply text is still delivered whole. Account generation, turn/session
+ownership, confirmation nonces and local grant/approval rules are unchanged.
+The CLI may retain next-message preferences; accepted turns keep their original
+choices across settings changes and explicit resume.
+
+### Spoken conversation (ticket 189)
+
+State advertises `voice_chat: true` when the service provides authenticated
+`POST /v1/chat/read {text}` → `{reading_id}` and
+`POST /v1/chat/spoken {reading_id}` → `{stage,audio_base64,format,reason}`.
+The first starts the central Read API; the second polls Spoken. Each receipt
+is bound to the local session and account generation, and ready/failed output
+is delivered once. Existing bearer/protocol/origin checks apply. No device
+credential or account token reaches the CLI. Speech text is bounded to 16 KiB;
+only the spoken response route permits a larger bounded audio response.
+
+CLI capture/playback workers carry an epoch. Manual cancellation, account
+change, failure and exit cannot replay a request or let a stale callback send
+a new message/reopen the microphone. No audio is stored in conversation history.
+
+## Explicit remote execution mode (ticket 198)
+
+`Capabilities` now includes `terminal_modes_v1`. The authenticated gateway's
+`TerminalStep` may carry `approval_mode=auto` or `ask`. Auto executes without
+local approval or a per-command grant. Ask executes only with `confirmed=true`
+from the gateway's exact owner/version-checked confirmation, not a local UI.
+The target device ID must match. Any other explicit mode, unconfirmed Ask,
+duplicate delivery or root unattended execution is refused. A missing mode keeps
+the legacy grant/local-approval contract. The service's bounded `work` state
+includes the execution mode. Time/output/stop and generation boundaries remain.
+
+The selected per-turn mode supersedes old documentation describing Auto as
+“only granted commands.” Grant-based calls remain supported for legacy callers;
+mode-based operation does not add a persistent wildcard grant or an expiry timer
+for each command. Current selection must be explicit in the originating Mike
+request. Switching another client's mode cannot alter an accepted turn/task.

@@ -45,14 +45,60 @@ mike-cli --resume TURN_ID         # explicit central-turn continuation
 printf 'What can you do?' | mike-cli
 ```
 
-## The prompt
+## The screen
 
-`mike> ` is a line editor (readline): the caret moves, ↑/↓ go through
-earlier messages, kept between runs in `$XDG_STATE_HOME/mike-cli/history`
-(0600). What Mike says is printed above the line being typed, which comes
-back as it was. A message sent while Mike is still on one waits its turn
-(ten at most, `Queued (n waiting)`) and goes when that turn ends; `/unqueue`
-takes them back unsent. Ctrl-D, like Ctrl-C, detaches.
+In a terminal `mike-cli` is a full-screen chat, like `claude` or `codex`.
+The input box sits at the bottom between two rules, with a footer under it
+(account, project, queue, and model / thinking / mode once the service
+reports them). The conversation scrolls above it into the terminal's own
+scrollback, as **You** and **Mike** blocks; Mike's steps and their output
+are indented lines, replies show headings, **bold**, `code`, code blocks and
+lists. While Mike works a spinner says what it is doing and for how long.
+
+- **Enter** sends; **Alt+Enter**, **Ctrl+J** or `\` then Enter add a line
+  (Shift+Enter too where the terminal reports it). Pasted text stays as
+  pasted. ←/→, Home/End, Ctrl+A/E/U/K/W edit; ↑/↓ move between lines, then
+  through earlier messages, kept between runs in
+  `$XDG_STATE_HOME/mike-cli/history` (0600).
+- **`/`** opens the command list, filtered as you type; ↑/↓ choose, Tab
+  completes, Enter runs. **`?`** on an empty box lists the shortcuts.
+- **Ctrl+V** pastes a clipboard image (wl-paste or xclip) as `[Image #1]`;
+  a pasted image path does the same. Mike cannot take images yet
+  (my-euglena-apps ticket 185), so sending one is refused and says so.
+- **Hold Ctrl+Space**: record immediately; release after holding to transcribe
+  into the draft. Enter sends only after the transcript is ready.
+- **Tap Ctrl+Space** (under 350 ms): keep recording after release. Ctrl+Space
+  again, bare Space or Enter stops and transcribes; that stopping key never
+  sends the message. Both recording modes keep the one-minute capture bound.
+- **Ctrl+Shift+Space**: spoken conversation on/off. Mike listens until you pause,
+  sends that utterance, performs work through the existing approval flow, speaks
+  the result, then listens again. **Ctrl+Space also turns conversation off.**
+  Thirty seconds without speech ends listening automatically. The microphone is
+  closed during transcription, model work and playback. Spoken yes/evet or
+  no/hayır applies only to the exact displayed approval; other words never
+  silently approve a command. Existing draft text/images are not auto-submitted.
+  Finish an existing manual capture before starting conversation.
+
+These shortcuts require the updated Console/IDE (open a new window) or a
+terminal advertising Kitty key-release support. Conversation also needs the
+updated Mike service and a local recorder/player (PipeWire, PulseAudio or ALSA).
+Closing the window or leaving the CLI closes capture/playback; stopping
+conversation never stops or approves a running tool command.
+
+- A message sent while Mike is still on one waits its turn (ten at most,
+  shown above the box) and goes when that turn ends; `/unqueue` takes them
+  back unsent.
+- **Esc** closes the menu, or stops the command Mike runs on this computer.
+  **Ctrl+C** clears the box; twice on an empty box detaches. **Ctrl+D**
+  detaches. Detaching never stops the service or Mike's accepted work.
+- `/clear` clears the screen only (Mike keeps the conversation); `/status`
+  says who, which computer, which project and turn.
+
+A question from Mike, or a request to run something on this computer, shows
+in a box above the input with the command in full and numbered choices.
+Nothing is chosen until you pick one with ↑/↓ or its number, so Enter alone
+never answers. `--ask`, `--resume` without a terminal, and piped input print
+plain lines as before.
 
 ## Conversations
 
@@ -114,3 +160,50 @@ The archive contains only Python client code, its launcher and metadata.
 same minor-series compatibility rule as Desktop. `cdlvsm install mike-cli`
 becomes usable when that release's assets have been published; a source
 commit does not publish a release. No GUI or Code runtime is bundled in CLI.
+
+## CodeLovesMe IDE context
+
+When launched in an IDE terminal with session context support, the CLI refreshes
+that IDE's identity, project and originating terminal before each message.
+Mike can use its existing local terminal tool to run `ide-control` for state,
+terminal movement and resizing. The context supplies an absolute helper command
+and a private descriptor path, so the shared service need not inherit the
+terminal's environment. No credential is sent to the model, and context grants
+no tool permission: the normal local command approval still applies.
+
+A closed or unavailable IDE fails clearly before submitting a new message.
+Outside an IDE, message submission is unchanged. Resuming an existing turn
+continues that turn's original context; it does not retarget already accepted
+work. A new message refreshes context for its current terminal.
+
+## Models, thinking, modes and images (chat protocol 2)
+
+`/model` lists configured chat models and their image/thinking capabilities;
+`/model MODEL` selects one. `/think off|low|medium|high` selects the requested
+thinking level on a compatible model. The footer shows the active turn's
+choices; changes during work apply to the next message, including messages
+queued while Mike works. `/mode ask|plan|auto`, or Shift+Tab, selects:
+
+- ask: every local command needs confirmation, even when a run grant exists;
+- plan: Mike proposes a plan and runs no tool or memory operation; saying yes
+  explicitly continues in ask mode, and saying no preserves the plan;
+- auto: only commands already covered by a run grant execute without asking.
+  Outside those grants, ordinary approval remains necessary.
+
+Ctrl+V attaches a clipboard PNG/JPEG; pasted file paths also attach supported
+images. Up to three files, 2 MiB each and 4 MiB total. Sending to a model that
+cannot see images fails clearly and keeps the draft. Image bytes are validated
+again by the local service and fully decoded by Mike's API; they are not put in
+conversation archives or memory extraction. Images and choices follow the turn
+through explicit resume; they are never retargeted by another client's settings.
+
+Replies still arrive when complete. Incremental response display is deferred.
+The client still supports chat protocol 1 for ordinary text; new controls need
+an updated service and API. A service restart retains pairing but its account
+session is held in memory: reconnect through the normal browser sign-in flow.
+
+The shared service persists a successful account sign-in privately and restores
+it after restart. CLI and Desktop reuse that account; no separate login per
+window. A reconnecting service reports an offline/restoring error rather than
+asking for another login. Expired/refused credentials still require sign-in.
+Only the service stores the account record; the CLI does not read its file.

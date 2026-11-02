@@ -17,7 +17,7 @@ mike-service-<version>-x86_64-linux/
   README.md
   service/                  the native Euglena application `mike-service`
     main.code, manifest.json, src/*.gene.code
-    adapters/terminal_worker.py, adapters/secure_open.py
+    adapters/terminal_worker.py, adapters/secure_open.py, adapters/account_session.py
     env.so http_client.so http_server.so json.so process.so strings.so timer.so
                             (exactly the modules in service/.code/lock.json,
                              hash-checked when staged)
@@ -28,7 +28,7 @@ mike-service-<version>-x86_64-linux/
 
 Nothing from `ui/`, no WebKit, GTK or display requirement. `mike-service
 run` needs only Code and POSIX tools (`sh`, `flock`, `tail`, `stat`,
-`install`, coreutils); the control commands and both adapters need Python 3
+`install`, coreutils); the control commands and the adapters need Python 3
 (the file opener additionally needs the session bus and a document portal,
 and fails closed without them). No step needs root.
 
