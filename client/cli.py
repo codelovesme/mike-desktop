@@ -234,15 +234,18 @@ class Terminal:
         if not self.status.get('conversations'):
             raise ValueError('upgrade mike-service to list conversations')
 
-    def conversations(self, arg=''):
+    def conversations(self, arg='', limit=20, start=False):
         """The person's conversations with Mike, the same list Mike's pages
-        show: this computer's by default, `all` for every one."""
+        show: this computer's by default, `all` for every one. At start the
+        few latest are shown, and nothing when there are none."""
         self.supports_conversations()
         which = 'all' if arg == 'all' else 'this'
-        found = self.service.call('/v1/chat/conversations', {'device': which, 'limit': 20})
+        found = self.service.call('/v1/chat/conversations', {'device': which, 'limit': limit})
         names = {d['device_id']: d.get('name', '') for d in found.get('devices', [])}
         self.listed = found.get('items', [])
         if not self.listed:
+            if start:
+                return
             self.show('No conversations on this computer yet; /conversations all lists every one.' if which == 'this'
                       else 'No conversations yet.')
             return
@@ -252,7 +255,10 @@ class Terminal:
             where = ', '.join(names[d] for d in one.get('devices', []) if names.get(d))
             mark = ' (open)' if one.get('id') == self.conversation else ''
             lines.append(f"{number:>2}. {one.get('title', '')}{mark}\n    {when}{' · ' + where if where else ''}")
-        lines.append('/open N continues one; /new starts a new one.' + ('' if which == 'all' else ' /conversations all lists every computer\'s.'))
+        if start:
+            lines.append('/open N continues one; just type to start a new one. /conversations lists more.')
+        else:
+            lines.append('/open N continues one; /new starts a new one.' + ('' if which == 'all' else ' /conversations all lists every computer\'s.'))
         self.show('\n'.join(lines))
 
     def open(self, arg):
@@ -492,6 +498,10 @@ def main(argv=None):
                 terminal.prompt = screen
                 if args.resume: terminal.resume(args.resume)
                 elif args.ask is not None: terminal.ask(args.ask)
+                elif terminal.status.get('conversations'):
+                    # Like Mike's pages, start on this computer's conversations.
+                    try: terminal.conversations(limit=5, start=True)
+                    except Exception: pass
                 result = screen.loop(args.wait, once)
                 terminal.prompt = None
             if result == 130:

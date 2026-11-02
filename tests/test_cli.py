@@ -86,6 +86,21 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.service.calls[-1][1]['conversation_id'], '')
         self.assertEqual(self.cli.conversation, 'c-new')
         with self.assertRaises(ValueError): self.cli.command('/open 9')
+    def test_start_shows_latest_conversations_quietly(self):
+        found = {'items':[], 'has_more':False, 'devices':[]}
+        def call(route, body):
+            self.service.calls.append((route, body)); return found
+        self.service.call = call
+        self.cli.status['conversations'] = True
+        before = self.out.getvalue()
+        self.cli.conversations(limit=5, start=True)
+        self.assertEqual(self.service.calls[-1], ('/v1/chat/conversations', {'device':'this','limit':5}))
+        self.assertEqual(self.out.getvalue(), before)  # nothing to say when there are none
+        found['items'] = [{'id':'c1','title':'Fix the build','updated_at':1793570000,'devices':[]}]
+        self.cli.conversations(limit=5, start=True)
+        self.assertIn(' 1. Fix the build', self.out.getvalue())
+        self.assertIn('/open N continues one', self.out.getvalue())
+        self.cli.command('/open 1')
     def test_active_turn_is_not_silently_replaced(self):
         self.cli.ask('first'); n=len(self.service.calls); self.cli.ask('second')
         self.assertEqual(len(self.service.calls),n)
