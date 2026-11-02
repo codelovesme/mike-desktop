@@ -58,10 +58,14 @@ grants = []
 seen_tasks = []
 
 Capabilities =>
+    items = ["terminal", "terminal_modes_v1", "terminal_home_v1"]
     | A server has no person at the screen to pick a folder or see a file.
-    if headless
-        return DeviceCapabilities { items = ["terminal", "terminal_modes_v1", "terminal_home_v1", "terminal_sudo_v1"] }
-    return DeviceCapabilities { items = ["file_search", "file_open", "terminal", "terminal_modes_v1", "terminal_home_v1", "terminal_sudo_v1"] }
+    if not headless, items = ["file_search", "file_open"] + items
+    | Root steps only where `mike-service install-root` put mike-root and the
+    | server's key in place (both root-owned; this service cannot add them).
+    emit Run { command = "test", args = ["-x", "/usr/local/libexec/mike-root", "-a", "-s", "/etc/mike-root/server.pub"] } to proc get rooted
+    if rooted ∉ Exception and rooted.success, items += ["terminal_root_v1"]
+    return DeviceCapabilities { items = items }
 
 | Only the fixed public service or an explicit loopback test host. No task
 | field ever becomes part of a URL.
@@ -681,6 +685,8 @@ ReceiveWork { task } =>
     if task ∈ InterfaceTask, goal = task.goal
     grant_id = ""
     if task ∈ TerminalStep and task.grant_id ∈ String, grant_id = task.grant_id
+    root_token = ""
+    if task ∈ TerminalStep and task.root_token ∈ String, root_token = task.root_token
     emit SeenBefore { id = task.id } to this get repeated
     work = {
         id = task.id
@@ -705,6 +711,7 @@ ReceiveWork { task } =>
         report_until = now.value + 290
         grant_id = grant_id
         approval_mode = task.approval_mode
+        root_token = root_token
         timeout = 60
     }
     emit MarkInflight { stage = "claimed" } to this
@@ -735,9 +742,13 @@ ReceiveWork { task } =>
             if user_id = "0"
                 emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "mode-based unattended commands are refused for root; run Mike as your ordinary user", outcome = "failed", detail = "" } to this
                 return WorkReceived
-            | sudo only after the person's yes in Mike (owner decision 2026-11-02).
-            if argv[0] = "sudo" and (task.approval_mode ≠ "ask" or task.confirmed ≠ true)
-                emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "sudo runs only after the person's yes in Mike; it did not run", outcome = "failed", detail = "" } to this
+            | Root only through mike-root, with the step Mike's server signed
+            | after the person's yes; plain sudo never runs here.
+            if root_token ≠ "" and (task.approval_mode ≠ "ask" or task.confirmed ≠ true)
+                emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "root steps run only after the person's yes in Mike; it did not run", outcome = "failed", detail = "" } to this
+                return WorkReceived
+            if root_token = "" and (argv[0] = "sudo" or argv[0] = "su" or argv[0] = "pkexec" or argv[0] = "doas")
+                emit FinishWork { state = "rejected", exit_code = null, stdout = "", stderr = "root steps go through mike-root with a step Mike signed; it did not run", outcome = "failed", detail = "" } to this
                 return WorkReceived
             emit Note { text = "Running under the person's selected " + task.approval_mode + " mode." } to this
             emit StartTerminal to this
@@ -930,7 +941,7 @@ StartTerminal =>
     request_path = runtime_dir + "/" + name + ".request"
     result_path = runtime_dir + "/" + name + ".result"
     step = { argv = work.argv, cwd = work.cwd, timeout_seconds = work.timeout, report_bytes = 4096 }
-    if work.argv[0] = "sudo" and work.approval_mode = "ask", step = step + { privileged = true }
+    if work.root_token ∈ String and work.root_token ≠ "", step = step + { root_token = work.root_token }
     emit Stringify { value = step } to json get request
     emit WritePrivate { path = request_path, text = request.value } to this get wrote
     if wrote ∉ Written
@@ -1351,6 +1362,7 @@ StateFor { session } =>
         approvals = session.approvals
         account = account_email
         device_id = device_id
+        host = host_url
         editor_version = 1
         chat_version = 2
         conversations = true

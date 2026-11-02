@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import pwd
 import signal
 import subprocess
 import sys
@@ -335,6 +336,47 @@ def unenroll() -> int:
         client.detach()
 
 
+MIKE_ROOT = "/usr/local/libexec/mike-root"
+
+
+def install_root(bundle: Path) -> int:
+    """Put mike-root in place for this computer: asks the sudo password once.
+
+    After this, a root step Mike's server signed (after the person's yes in
+    Mike) runs without a password; nothing else becomes passwordless."""
+    helper = bundle / "service/root/mike_root.py"
+    if not helper.is_file():
+        raise SystemExit(f"mike-service install-root: {helper} is missing from this package")
+    client = mike_service.MikeService("install-root", approvals=False)
+    try:
+        state = client.attach()
+    except (mike_service.ServiceError, mike_service.ServiceUnavailable) as error:
+        raise SystemExit(f"mike-service install-root: the service must be running and paired ({error})")
+    finally:
+        client.detach()
+    device, host = state.get("device_id") or "", state.get("host") or ""
+    if not state.get("paired") or not device or not host:
+        raise SystemExit("mike-service install-root: pair this computer with Mike first")
+    user = pwd.getpwuid(os.getuid()).pw_name
+    print(f"Installing mike-root for {user} on device {device} (server {host}).")
+    print("sudo asks your password once; afterwards only mike-root runs without one, and it runs")
+    print("only steps Mike's server signed after you said yes in Mike.")
+    done = subprocess.run(["sudo", "/usr/bin/python3", "-I", str(helper), "--install",
+                           "--host", host, "--device", device, "--user", user])
+    if done.returncode != 0:
+        return done.returncode
+    print("Restart the service so Mike sees it: mike-service restart")
+    return 0
+
+
+def uninstall_root() -> int:
+    if not os.path.exists(MIKE_ROOT):
+        print("mike-service: mike-root is not installed")
+        return 0
+    # Through python, not the passwordless rule: that one takes no arguments.
+    return subprocess.run(["sudo", "/usr/bin/python3", "-I", MIKE_ROOT, "--uninstall"]).returncode
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         raise SystemExit("usage: service_control.py <bundle> <command>")
@@ -358,6 +400,10 @@ def main(argv: list[str]) -> int:
         return grant(rest)
     if command == "unenroll":
         return unenroll()
+    if command == "install-root":
+        return install_root(bundle)
+    if command == "uninstall-root":
+        return uninstall_root()
     print("mike-service: unknown command", command, file=sys.stderr)
     return 2
 

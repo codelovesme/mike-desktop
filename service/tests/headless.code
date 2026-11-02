@@ -142,7 +142,7 @@ emit Call { method = "GET", path = "/v1/state", body = "", bearer = view } to th
 assert enrolled.value.paired
 assert enrolled.value.headless
 assert enrolled.value.account = "ada@example.test"
-assert enrolled.value.capabilities = ["terminal", "terminal_modes_v1", "terminal_home_v1", "terminal_sudo_v1"]
+assert enrolled.value.capabilities = ["terminal", "terminal_modes_v1", "terminal_home_v1"]
 assert enrolled.value.enrollment.state = "confirmed"
 emit Stringify { value = enrolled.value } to json get enrolled_text
 emit Includes { text = enrolled_text.value, needle = secret } to this get leaked_after
