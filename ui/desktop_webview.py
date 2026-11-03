@@ -17,7 +17,6 @@ import os
 from pathlib import Path
 import queue
 import secrets
-import shlex
 import shutil
 import sys
 import threading
@@ -651,7 +650,7 @@ class MikeWindow:
         self.running_work = work.get("id", "") if running else ""
         self.stop_button.set_sensitive(running)
         if running:
-            self.set_status("Mike is running: " + shlex.join(work.get("argv") or [])[:120])
+            self.set_status("Mike is running: " + mike_service.shown_command(work.get("argv") or [])[:120])
         elif isinstance(work, dict) and work.get("claim") == "other":
             self.set_status("Another Mike window on this computer is reviewing Mike's request.")
         elif connection == "connected":
@@ -779,7 +778,7 @@ class MikeWindow:
             transient_for=self.window, modal=True, message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.YES_NO, text="Allow Mike to run this command?",
         )
-        dialog.format_secondary_text("On this computer, as your user:\n" + shlex.join(argv) + "\n\nWorking directory: " + str(cwd) + "\n\nBounded output will be sent to Mike.")
+        dialog.format_secondary_text("On this computer, as your user:\n" + mike_service.shown_command(argv) + "\n\nWorking directory: " + str(cwd) + "\n\nBounded output will be sent to Mike.")
         approved = dialog.run() == Gtk.ResponseType.YES
         dialog.destroy()
         self.task_dialog_open = False
@@ -858,7 +857,7 @@ def activity_text(entries: list) -> str:
         kind = entry.get("kind")
         argv = entry.get("argv") if isinstance(entry.get("argv"), list) else []
         if kind == "requested" and argv:
-            lines.append("Requested: " + shlex.join(argv) + "\nDirectory: " + str(entry.get("cwd")))
+            lines.append("Requested: " + mike_service.shown_command(argv) + "\nDirectory: " + str(entry.get("cwd")))
         elif kind == "requested":
             lines.append("Requested: " + str(entry.get("text") or "a local file task"))
         elif kind == "running":

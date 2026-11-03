@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import stat
 import subprocess
@@ -19,6 +20,19 @@ from urllib.request import Request, urlopen
 
 PROTOCOL = 1
 UNIT = os.environ.get("MIKE_SERVICE_UNIT", "mike-service.service")
+
+
+def shown_command(argv) -> str:
+    """What a person reads for a terminal step: the command Mike wrote, not
+    the shell wrapper it runs in (`/bin/bash -lc C` -> `C`,
+    `sudo /bin/bash -c C` -> `sudo C`)."""
+    if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+        return json.dumps(argv)
+    if len(argv) == 3 and argv[0] in ("/bin/bash", "bash") and argv[1] == "-lc":
+        return argv[2]
+    if len(argv) == 4 and argv[0] == "sudo" and argv[1] in ("/bin/bash", "bash") and argv[2] == "-c":
+        return "sudo " + argv[3]
+    return shlex.join(argv)
 
 
 class ServiceUnavailable(Exception):

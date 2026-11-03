@@ -8,12 +8,11 @@ import getpass
 import json
 import os
 from pathlib import Path
-import shlex
 import sys
 import time
 import unicodedata
 
-from mike_service import MikeService, ServiceError, ServiceUnavailable
+from mike_service import MikeService, ServiceError, ServiceUnavailable, shown_command
 import sign_in
 import ide_context
 import images as image_input
@@ -192,7 +191,7 @@ class Terminal:
                 self.shown.add(key)
                 what = work.get('argv') or work.get('file') or work.get('goal')
                 if self.prompt:
-                    shown = shlex.join(what) if isinstance(what, list) and all(isinstance(x, str) for x in what) else json.dumps(what)
+                    shown = shown_command(what) if isinstance(what, list) else json.dumps(what)
                     self.emit('request', None, f"{shown}  (in {work.get('cwd') or self.workspace})")
                     return None
                 self.show(f"Local request {work['id']} in {work.get('cwd') or self.workspace}:\n{json.dumps(what)}")
