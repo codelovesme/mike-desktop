@@ -192,7 +192,8 @@ def fetch_public_key(host: str) -> str:
         raise Refused("the Mike server must be https")
     body = json.dumps({"_class": "Open", "particle": {"_class": "RootPublicKey"}}).encode()
     request = urllib.request.Request(host.rstrip("/") + "/api/mike-interface", data=body,
-                                     headers={"content-type": "application/json"})
+                                     # Cloudflare refuses Python-urllib's own agent (1010).
+                                     headers={"content-type": "application/json", "user-agent": "mike-root/1"})
     with urllib.request.urlopen(request, timeout=20) as response:
         answer = json.loads(response.read(64 * 1024))
     key = answer.get("public_key") if isinstance(answer, dict) else None
