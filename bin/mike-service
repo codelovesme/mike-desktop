@@ -4,6 +4,7 @@
 #   mike-service start|stop|status|restart
 #   mike-service install-unit | uninstall-unit
 #   mike-service enroll --account EMAIL | unenroll | grant add|list|revoke
+#   mike-service install-root | uninstall-root   (root steps through mike-root)
 set -eu
 launcher_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
 here=$launcher_dir

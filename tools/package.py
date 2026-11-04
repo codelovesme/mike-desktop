@@ -69,6 +69,7 @@ def stage_service(stage: Path, version: str) -> None:
         shutil.copy2(service / entry, staged / entry)
     shutil.copytree(service / "src", staged / "src")
     shutil.copytree(service / "adapters", staged / "adapters", ignore=IGNORE)
+    shutil.copytree(service / "root", staged / "root", ignore=IGNORE)
     locked = json.loads((service / ".code/lock.json").read_text())["modules"]
     for module, pin in locked.items():
         path = service / ".code/modules" / module / pin["version"] / f"{module}-linux-x86_64.so"

@@ -12,10 +12,10 @@ import unittest
 WORKER = Path(__file__).resolve().parents[1] / "service/adapters/terminal_worker.py"
 
 
-def invoke(argv, cwd, timeout_seconds=5, env=None, report_bytes=None, privileged=None):
+def invoke(argv, cwd, timeout_seconds=5, env=None, report_bytes=None, root_token=None):
     request = {"argv": argv, "cwd": str(cwd), "timeout_seconds": timeout_seconds}
-    if privileged is not None:
-        request["privileged"] = privileged
+    if root_token is not None:
+        request["root_token"] = root_token
     if report_bytes is not None:
         request["report_bytes"] = report_bytes
     completed = subprocess.run(
@@ -43,16 +43,16 @@ class TerminalWorkerTest(unittest.TestCase):
             self.assertEqual(invoke(["pwd"], "~/work", env=env)["stdout"].strip(), home + "/work")
             self.assertEqual(invoke(["pwd"], "~nobody", env=env).get("state"), "rejected")
 
-    def test_only_a_privileged_step_may_use_sudo_and_never_prompts(self):
+    def test_root_goes_only_through_mike_root_and_never_prompts(self):
         with tempfile.TemporaryDirectory() as directory:
-            self.assertEqual(invoke(["sudo", "-s"], directory, privileged=True).get("state"), "rejected")
-            self.assertEqual(invoke(["id"], directory, privileged=True).get("state"), "rejected")
+            self.assertEqual(invoke(["id"], directory, root_token="").get("state"), "rejected")
             plain = invoke(["sudo", "-n", "true"], directory)
             self.assertNotEqual(plain.get("exit_code"), 0)  # no_new_privs: sudo cannot gain root
-            rooted = invoke(["sudo", "true"], directory, privileged=True)
-            self.assertEqual(rooted["state"], "completed")  # sudo -n: never waits for a password
-            if rooted["exit_code"] != 0:
-                self.assertIn("NOPASSWD", rooted["stderr"])
+            # A forged token reaches mike-root (or sudo, where it is not
+            # installed) and runs nothing; either way nothing waits for a password.
+            rooted = invoke(["id"], directory, root_token="not.a.token")
+            self.assertEqual(rooted["state"], "completed")
+            self.assertNotEqual(rooted["exit_code"], 0)
 
     def test_missing_timeout_and_output_limit_are_distinct(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -12,7 +12,6 @@ from pathlib import Path
 import queue
 import re
 import select
-import shlex
 import shutil
 import signal
 import subprocess
@@ -25,6 +24,7 @@ import tty
 import unicodedata
 
 from voice_audio import Detector, Player, TAP_SECONDS, IDLE_SECONDS
+from mike_service import shown_command
 
 # ── Colours ─────────────────────────────────────────────────────────────
 RESET = '\x1b[0m'
@@ -775,7 +775,7 @@ class Screen:
         if work and work.get('approval_id') and self.held != 'file:' + work['approval_id'][:12]:
             key = work['approval_id'][:12]
             what = work.get('argv') or work.get('file') or work.get('goal')
-            body = shlex.join(what) if isinstance(what, list) and all(isinstance(x, str) for x in what) else json.dumps(what)
+            body = shown_command(what) if isinstance(what, list) else json.dumps(what)
             body = safe(body)
             where = safe(work.get('cwd') or t.workspace).replace(str(Path.home()), '~', 1)
             if work.get('kind') == 'file' and work.get('stage') == 'awaiting_approval':

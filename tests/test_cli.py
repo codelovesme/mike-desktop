@@ -198,4 +198,14 @@ class CliTest(unittest.TestCase):
             self.assertIn('v0.5.0',version.stdout)
 
 
-if __name__=='__main__': unittest.main()
+class ShownCommandTest(unittest.TestCase):
+    def test_shell_wrappers_show_the_command_mike_wrote(self):
+        from mike_service import shown_command
+        self.assertEqual(shown_command(['/bin/bash', '-lc', 'ls -la ~/Pictures']), 'ls -la ~/Pictures')
+        self.assertEqual(shown_command(['sudo', '/bin/bash', '-c', 'apt update']), 'sudo apt update')
+        self.assertEqual(shown_command(['ls', '-la', 'My Pictures']), "ls -la 'My Pictures'")
+        self.assertEqual(shown_command(['/bin/bash', '-lc', 'a', 'b']), "/bin/bash -lc a b")
+
+
+if __name__ == '__main__':
+    unittest.main()

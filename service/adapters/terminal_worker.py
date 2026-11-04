@@ -67,7 +67,7 @@ def bounded_output(value: str, limit: int) -> str:
 
 def validate(request: object) -> tuple[list[str], str, int]:
     required = {"argv", "cwd", "timeout_seconds"}
-    if not isinstance(request, dict) or not required <= set(request) <= required | {"report_bytes", "privileged"}:
+    if not isinstance(request, dict) or not required <= set(request) <= required | {"report_bytes", "root_token"}:
         raise ValueError("expected argv, cwd, and timeout_seconds")
     if "report_bytes" in request:
         limit = request["report_bytes"]
@@ -88,20 +88,25 @@ def validate(request: object) -> tuple[list[str], str, int]:
     return argv, cwd, timeout
 
 
-SUDO_HINT = ("\nsudo needs a password here: Mike's yes is meant to be the only gate, so add "
-             "a NOPASSWD rule for this user (see mike-service's README, \"sudo\").")
+MIKE_ROOT = "/usr/local/libexec/mike-root"
+ROOT_HINT = ("\nroot steps need mike-root on this computer: run `mike-service install-root` "
+             "(it asks the sudo password once).")
 
 
 def run(request: object) -> dict:
     global _child
     argv, cwd, timeout = validate(request)
-    # A sudo step the person confirmed in Mike (Ask, whatever the mode) runs
-    # with `sudo -n`: no password prompt, only this step may gain privilege.
-    privileged = request.get("privileged") is True
+    # A root step carries the token Mike's server signed after the person's
+    # yes. It goes to mike-root on stdin; mike-root checks it and runs the
+    # step the token names (never the argv here), so nothing this worker or
+    # the service holds can widen it.
+    token = request.get("root_token")
+    privileged = token is not None
     if privileged:
-        if argv[0] != "sudo" or len(argv) < 2 or argv[1].startswith("-"):
-            raise ValueError("a privileged step is sudo followed by the command, without sudo options")
-        argv = ["sudo", "-n", "--"] + argv[1:]
+        if not isinstance(token, str) or not token or len(token) > 8192:
+            raise ValueError("root_token must be the signed step")
+        argv = ["sudo", "-n", MIKE_ROOT]
+        cwd = "/"  # mike-root moves into the step's folder itself, as root
     if not os.path.isdir(cwd):
         return {"state": "failed", "reason": "working directory does not exist"}
     if not privileged:
@@ -113,13 +118,19 @@ def run(request: object) -> dict:
     state = "completed"
     try:
         _child = subprocess.Popen(
-            argv, cwd=cwd, env=_environment(), stdin=subprocess.DEVNULL,
+            argv, cwd=cwd, env=_environment(), stdin=subprocess.PIPE if privileged else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
         )
     except FileNotFoundError:
         return {"state": "failed", "reason": "command not found"}
     except OSError as exc:
         return {"state": "failed", "reason": f"could not start command: {exc.strerror}"}
+    if privileged:
+        try:
+            _child.stdin.write(token.encode())
+            _child.stdin.close()
+        except OSError:
+            pass
 
     with selectors.DefaultSelector() as selector:
         for pipe, target in ((_child.stdout, output), (_child.stderr, error)):
@@ -149,7 +160,7 @@ def run(request: object) -> dict:
         _child.wait()
 
     if privileged and _child.returncode == 1 and b"password is required" in error:
-        error.extend(SUDO_HINT.encode())
+        error.extend(ROOT_HINT.encode())
     return {
         "state": state,
         "exit_code": _child.returncode if state == "completed" else None,

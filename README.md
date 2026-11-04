@@ -129,18 +129,33 @@ of its rights, and the directory is only where they start. See
 Google sign-in uses the same external browser connection route when the
 identity provider is configured.
 
-### sudo
+### Root steps (mike-root)
 
-A command that needs root reaches this computer as `sudo <command>` only
-after you said Yes to it in Mike — sudo is always asked, even in Auto mode.
-The service runs it as `sudo -n`, never waiting for a password, so it works
-only once your user may sudo without one:
+Mike never runs `sudo`, `su`, `pkexec` or `doas` on its own. A command that
+needs root runs only on a computer where you turned it on, once:
 
-    echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/90-mike-nopasswd
-    sudo chmod 0440 /etc/sudoers.d/90-mike-nopasswd
+    mike-service install-root     # asks your sudo password once
+    mike-service restart
 
-That rule is for your user, not only for Mike: every program you run can
-then become root without a password. Remove the file to take it back.
+That installs `mike-root`, a small root-owned helper, and one sudoers line
+that lets your user run exactly that helper, with no arguments, without a
+password. Nothing else becomes passwordless.
+
+`mike-root` runs nothing on its own word: it needs a step Mike's server
+signed (Ed25519) after you said Yes to it in Mike — root steps are always
+asked, even in Auto mode. It checks the signature with the key it fetched at
+install time, that the step is for this computer, still live (two minutes)
+and never ran before, then runs exactly that command. Another program of
+your user can start `mike-root` but cannot sign a step, so it cannot become
+root through it. The trade-off: whoever controls your Mike account or Mike's
+server could sign root steps for this computer — that is why it is off until
+you turn it on.
+
+    mike-service uninstall-root   # asks the password; removes the helper,
+                                  # the key and the sudoers line
+
+Without it, Mike does what it can without root and gives you the exact
+command to run yourself.
 
 ## Retired in 0.5
 
