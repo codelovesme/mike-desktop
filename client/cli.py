@@ -281,6 +281,23 @@ class Terminal:
             self.emit('you', 'You: ' + str(one.get('text', '')), str(one.get('text', '')))
             self.emit('mike', 'Mike: ' + str(one.get('reply', '')), str(one.get('reply', '')))
 
+    def compact(self):
+        """/compact: Mike folds this conversation into its summary, the same
+        as Mike's page. The summary is written in the background; the
+        messages stay saved and later ones use it."""
+        if not self.status.get('compact'):
+            raise ValueError('upgrade mike-service to compact conversations')
+        if not self.conversation:
+            raise ValueError('no conversation yet; /compact works after the first message')
+        try:
+            self.service.call('/v1/chat/compact', {'conversation_id': self.conversation})
+        except ServiceError as error:
+            if error.error != 'not_compacted':
+                raise
+            self.show('Not compacted: ' + str(error.body.get('message', '')))
+            return
+        self.show('Summarizing this conversation. Your next messages will use the summary; the messages above stay saved.')
+
     @staticmethod
     def matches(given, nonce):
         return isinstance(nonce, str) and len(given) >= 12 and (given == nonce or given == nonce[:12])
@@ -322,6 +339,9 @@ class Terminal:
             return
         if verb == '/open':
             self.open(arg)
+            return
+        if verb == '/compact':
+            self.compact()
             return
         if verb in ('/new', '/leave'):
             self.show(f'Left turn {self.turn or "(none)"}; accepted work is not cancelled.')
@@ -379,7 +399,7 @@ class Terminal:
             self.show('\n'.join(f"{name} {args}".strip().ljust(18) + what for name, args, what in COMMANDS)
                       + '\n\n' + '\n'.join(k.ljust(30) + v for k, v in SHORTCUTS))
         elif verb == '/help':
-            self.show('/yes ID, /no ID: answer the displayed question; /approve ID, /decline ID: local decision\n/find ID QUERY: file search in this project; /stop: current local command only\n/conversations [all], /open N: continue an earlier conversation; /new: a new one\n/resume TURN, /leave, /unqueue, /quit. Enter alone never approves; a message typed while Mike works waits its turn.\n↑/↓ earlier messages. Ctrl-C or Ctrl-D detaches; the service stays alive.\nAccount: mike-cli --account, --sign-in, --switch-account, --sign-out.')
+            self.show('/yes ID, /no ID: answer the displayed question; /approve ID, /decline ID: local decision\n/find ID QUERY: file search in this project; /stop: current local command only\n/conversations [all], /open N: continue an earlier conversation; /new: a new one; /compact: summarize this one\n/resume TURN, /leave, /unqueue, /quit. Enter alone never approves; a message typed while Mike works waits its turn.\n↑/↓ earlier messages. Ctrl-C or Ctrl-D detaches; the service stays alive.\nAccount: mike-cli --account, --sign-in, --switch-account, --sign-out.')
         else:
             self.show('Unknown command. /help lists commands.')
 

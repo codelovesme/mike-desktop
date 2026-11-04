@@ -413,6 +413,22 @@ emit Reply { body = "{\"_class\":\"Failed\",\"reason\":\"I could not make out th
 emit Call { method = "POST", path = "/v1/chat/hear", body = "{\"audio_base64\":\"UklGRg==\",\"format\":\"webm\"}", bearer = asker_token, extra = {} } to this get not_made_out
 assert not_made_out.status = 503 and not_made_out.value.error = "mike_unavailable"
 
+| /compact asks Mike to fold one named conversation; a refusal says why.
+emit Call { method = "POST", path = "/v1/chat/compact", body = "{}", bearer = asker_token, extra = {} } to this get compact_unnamed
+assert compact_unnamed.status = 400
+emit Reply { body = "{\"_class\":\"Compacting\",\"conversation_id\":\"conv-1\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/compact", body = "{\"conversation_id\":\"conv-1\"}", bearer = asker_token, extra = {} } to this get compacted
+assert compacted.status = 200 and compacted.value.compacting and compacted.value.conversation_id = "conv-1"
+emit LastPost to this get compact_post
+assert compact_post.value.particle._class = "CompactConversation"
+assert compact_post.value.particle.conversation_id = "conv-1"
+emit Reply { body = "{\"_class\":\"Rejected\",\"reason\":\"nothing to compact yet\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/compact", body = "{\"conversation_id\":\"conv-1\"}", bearer = asker_token, extra = {} } to this get too_early
+assert too_early.status = 409 and too_early.value.message = "nothing to compact yet"
+emit Reply { body = "{\"_class\":\"MemoryFailed\",\"reason\":\"down\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/compact", body = "{\"conversation_id\":\"conv-1\"}", bearer = asker_token, extra = {} } to this get compact_down
+assert compact_down.status = 503
+
 | A speech receipt is session-bound, and ready audio is delivered once.
 emit Reply { body = "{\"_class\":\"Speaking\",\"reading_id\":\"read-1\"}" } to http
 emit Call { method = "POST", path = "/v1/chat/read", body = "{\"text\":\"Hello\"}", bearer = asker_token, extra = {} } to this get reading

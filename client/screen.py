@@ -57,6 +57,7 @@ COMMANDS = [
     ('/conversations', '[all]', "this computer's conversations, or every one"),
     ('/open', 'N', 'continue a conversation from /conversations'),
     ('/new', '', 'start a new conversation'),
+    ('/compact', '', 'summarize this conversation; later messages use the summary'),
     ('/stop', '', "stop the command Mike is running on this computer"),
     ('/resume', 'TURN', 'follow an earlier turn by its id'),
     ('/unqueue', '', 'take back the messages waiting to be sent'),
