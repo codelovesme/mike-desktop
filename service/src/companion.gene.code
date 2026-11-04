@@ -1182,6 +1182,9 @@ Route { method, path, body, headers } =>
     if path = "/v1/chat/history"
         emit ChatHistory { request = request } to this get history
         return history
+    if path = "/v1/chat/compact"
+        emit ChatCompact { request = request } to this get compacting
+        return compacting
     if path = "/v1/chat/resume"
         emit ChatResume { session = session, request = request } to this get resumed
         return resumed
@@ -1366,6 +1369,7 @@ StateFor { session } =>
         editor_version = 1
         chat_version = 2
         conversations = true
+        compact = true
         voice_chat = true
         model = session.model
         thinking = session.thinking
@@ -1630,6 +1634,25 @@ ChatHistory { request } =>
     loop one over recent.turns
         shown += [{ text = one.text, reply = one.reply }]
     return Answer { status = 200, value = { conversation_id = request.conversation_id, turns = shown, has_more = recent.has_more } }
+
+| `/compact`: Mike folds the conversation so far into its summary (ticket
+| 196, the same `CompactConversation` Mike's page sends). It answers at once;
+| the summary is written in the background and later messages use it.
+ChatCompact { request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
+        return out
+    if request.conversation_id ∉ String or request.conversation_id = ""
+        emit Fail { status = 400, error = "bad_request", message = "conversation_id is required" } to this get empty
+        return empty
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = CompactConversation { conversation_id = request.conversation_id } } } to this get compacting
+    if compacting ∈ Rejected and compacting.reason ∈ String
+        emit Fail { status = 409, error = "not_compacted", message = compacting.reason } to this get refused
+        return refused
+    if compacting ∉ Compacting
+        emit Fail { status = 503, error = "mike_unavailable", message = "Mike could not compact the conversation" } to this get unavailable
+        return unavailable
+    return Answer { status = 200, value = { conversation_id = request.conversation_id, compacting = true } }
 
 | A recording, as words: Mike's `Hear`, the same road a spoken question
 | takes from Mike's own pages. Nothing is kept here; the words go back to

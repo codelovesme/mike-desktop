@@ -86,6 +86,24 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.service.calls[-1][1]['conversation_id'], '')
         self.assertEqual(self.cli.conversation, 'c-new')
         with self.assertRaises(ValueError): self.cli.command('/open 9')
+    def test_compact_asks_for_the_open_conversation(self):
+        with self.assertRaises(ValueError): self.cli.command('/compact')  # an old service
+        self.cli.status['compact'] = True
+        self.cli.conversation = ''
+        with self.assertRaises(ValueError): self.cli.command('/compact')  # nothing said yet
+        self.cli.conversation = 'c-desk'
+        self.cli.command('/compact')
+        self.assertEqual(self.service.calls[-1], ('/v1/chat/compact', {'conversation_id':'c-desk'}))
+        self.assertIn('Summarizing this conversation', self.out.getvalue())
+        def refuse(route, body):
+            raise ServiceError(409, {'error':'not_compacted', 'message':'nothing to compact yet'})
+        self.service.call = refuse
+        self.cli.command('/compact')
+        self.assertIn('Not compacted: nothing to compact yet', self.out.getvalue())
+        def down(route, body):
+            raise ServiceError(503, {'error':'mike_unavailable', 'message':'down'})
+        self.service.call = down
+        with self.assertRaises(ServiceError): self.cli.command('/compact')
     def test_start_shows_latest_conversations_quietly(self):
         found = {'items':[], 'has_more':False, 'devices':[]}
         def call(route, body):
