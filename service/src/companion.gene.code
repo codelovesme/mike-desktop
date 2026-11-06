@@ -1185,6 +1185,15 @@ Route { method, path, body, headers } =>
     if path = "/v1/chat/compact"
         emit ChatCompact { request = request } to this get compacting
         return compacting
+    if path = "/v1/chat/rename"
+        emit ChatRename { request = request } to this get renamed
+        return renamed
+    if path = "/v1/chat/archive"
+        emit ChatArchive { request = request } to this get archived
+        return archived
+    if path = "/v1/chat/delete"
+        emit ChatDelete { request = request } to this get deleted
+        return deleted
     if path = "/v1/chat/resume"
         emit ChatResume { session = session, request = request } to this get resumed
         return resumed
@@ -1370,6 +1379,7 @@ StateFor { session } =>
         chat_version = 2
         conversations = true
         compact = true
+        rename_archive = true
         voice_chat = true
         model = session.model
         thinking = session.thinking
@@ -1580,6 +1590,10 @@ ChatAsk { session, request } =>
             return no_binding
         editor = { binding = binding.value, mode = mode, workspace = workspace, context = request.editor.context }
     emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Ask { text = request.text, conversation_id = request.conversation_id, device_id = device_id, workspace = workspace, editor = editor, model = request.model, thinking = request.thinking, mode = request.mode, images = request.images } } } to this get started
+    if started ∈ Busy
+        reason = "Mike is still working on the last message in this conversation"
+        if started.reason ∈ String, reason = started.reason
+        return Answer { status = 409, value = { error = "busy", message = reason, turn_id = started.turn_id, conversation_id = started.conversation_id } }
     if started ∉ Thinking
         reason = "Mike did not start the turn"
         if started.reason ∈ String, reason = started.reason
@@ -1607,7 +1621,9 @@ ChatConversations { request } =>
     if request.limit ∈ Number and request.limit > 0 and request.limit < 101, limit = request.limit
     skip = 0
     if request.skip ∈ Number and request.skip ≥ 0, skip = request.skip
-    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Conversations { device_id = filter, limit = limit, skip = skip } } } to this get listed
+    archived = false
+    if request.archived = true, archived = true
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = Conversations { device_id = filter, limit = limit, skip = skip, archived = archived } } } to this get listed
     if listed ∉ ConversationList or not listed.ok
         emit Fail { status = 503, error = "mike_unavailable", message = "Mike's conversations are unavailable" } to this get unavailable
         return unavailable
@@ -1653,6 +1669,63 @@ ChatCompact { request } =>
         emit Fail { status = 503, error = "mike_unavailable", message = "Mike could not compact the conversation" } to this get unavailable
         return unavailable
     return Answer { status = 200, value = { conversation_id = request.conversation_id, compacting = true } }
+
+| `/rename`: the person names a conversation (ticket 193, the same
+| `RenameConversation` Mike's page sends). Mike trims it, cuts it to 80
+| characters and refuses one that looks like a credential.
+ChatRename { request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
+        return out
+    if request.conversation_id ∉ String or request.conversation_id = "" or request.title ∉ String
+        emit Fail { status = 400, error = "bad_request", message = "conversation_id and title are required" } to this get empty
+        return empty
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = RenameConversation { conversation_id = request.conversation_id, title = request.title } } } to this get renamed
+    if renamed ∈ Rejected and renamed.reason ∈ String
+        emit Fail { status = 409, error = "not_renamed", message = renamed.reason } to this get refused
+        return refused
+    if renamed ∉ ConversationRenamed
+        emit Fail { status = 503, error = "mike_unavailable", message = "Mike could not rename the conversation" } to this get unavailable
+        return unavailable
+    return Answer { status = 200, value = { conversation_id = renamed.conversation_id, title = renamed.title } }
+
+| `/archive` and `/unarchive` (ticket 193): put a conversation away or bring
+| it back. Archived is not deleted; it only leaves the list.
+ChatArchive { request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
+        return out
+    if request.conversation_id ∉ String or request.conversation_id = ""
+        emit Fail { status = 400, error = "bad_request", message = "conversation_id is required" } to this get empty
+        return empty
+    put_away = request.archived ≠ false
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = ArchiveConversation { conversation_id = request.conversation_id, archived = put_away } } } to this get archived
+    if archived ∈ Rejected and archived.reason ∈ String
+        emit Fail { status = 409, error = "not_archived", message = archived.reason } to this get refused
+        return refused
+    if archived ∉ ConversationArchived
+        emit Fail { status = 503, error = "mike_unavailable", message = "Mike could not archive the conversation" } to this get unavailable
+        return unavailable
+    return Answer { status = 200, value = { conversation_id = archived.conversation_id, archived = archived.archived } }
+
+| `/delete` (ticket 193): the conversation and its messages and summary go
+| for good, the same `DeleteConversation` Mike's page sends. What Mike
+| learned from it stays (the owner's decision: memory is permanent).
+ChatDelete { request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
+        return out
+    if request.conversation_id ∉ String or request.conversation_id = ""
+        emit Fail { status = 400, error = "bad_request", message = "conversation_id is required" } to this get empty
+        return empty
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = DeleteConversation { conversation_id = request.conversation_id } } } to this get deleted
+    if deleted ∈ Rejected and deleted.reason ∈ String
+        emit Fail { status = 409, error = "not_deleted", message = deleted.reason } to this get refused
+        return refused
+    if deleted ∉ ConversationDeleted
+        emit Fail { status = 503, error = "mike_unavailable", message = "Mike could not delete the conversation" } to this get unavailable
+        return unavailable
+    return Answer { status = 200, value = { conversation_id = deleted.conversation_id, deleted = deleted.deleted } }
 
 | A recording, as words: Mike's `Hear`, the same road a spoken question
 | takes from Mike's own pages. Nothing is kept here; the words go back to
