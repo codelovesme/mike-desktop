@@ -451,10 +451,13 @@ emit Call { method = "POST", path = "/v1/chat/archive", body = "{\"conversation_
 assert brought_back.status = 200 and not brought_back.value.archived
 emit LastPost to this get unarchive_post
 assert not unarchive_post.value.particle.archived
+| (The list also asks for device names afterwards, so read its first post.)
+emit Forget to http
 emit Reply { body = "{\"_class\":\"ConversationList\",\"ok\":true,\"items\":[],\"has_more\":false}" } to http
 emit Call { method = "POST", path = "/v1/chat/conversations", body = "{\"device\":\"all\",\"archived\":true}", bearer = asker_token, extra = {} } to this get archived_list
 assert archived_list.status = 200
-emit LastPost to this get list_post
+emit Posted to http get list_posts
+emit Parse { text = list_posts.items[0].body } to json get list_post
 assert list_post.value.particle._class = "Conversations" and list_post.value.particle.archived
 emit Reply { body = "{\"_class\":\"Busy\",\"turn_id\":\"turn-run\",\"conversation_id\":\"conv-1\",\"reason\":\"Mike is still working\"}" } to http
 emit Call { method = "POST", path = "/v1/chat/ask", body = "{\"text\":\"again\",\"conversation_id\":\"conv-1\"}", bearer = asker_token, extra = {} } to this get busy
