@@ -42,6 +42,7 @@ class Terminal:
         self.turn = ''
         self.conversation = ''  # '' = the next message starts a new conversation
         self.listed = []        # the conversations /conversations last showed
+        self.deleting = ''      # the conversation /delete asked about, until /delete yes
         self.view = {}
         self.local = None
         self.shown = set()
@@ -351,6 +352,36 @@ class Terminal:
         else:
             self.show(f'Back in the list: {title}.')
 
+    def delete(self, arg):
+        """/delete [N] asks first; /delete yes deletes it for good: its
+        messages and summary. What Mike learned from it stays."""
+        self.supports_rename_archive()
+        if arg != 'yes':
+            self.deleting = self.chosen(arg, '/delete')
+            title = next((one.get('title', '') for one in self.listed if one.get('id') == self.deleting), '') or 'this conversation'
+            self.show(f'Delete {title} and its messages for good? What Mike learned from it stays. /delete yes deletes it.')
+            return
+        target, self.deleting = self.deleting, ''
+        if not target:
+            raise ValueError('nothing to delete; /delete [N] chooses one first')
+        if target == self.conversation and self.turn and not self.finished:
+            raise ValueError('a turn is still active in this conversation; wait for it first')
+        try:
+            self.service.call('/v1/chat/delete', {'conversation_id':target})
+        except ServiceError as error:
+            if error.error != 'not_deleted':
+                raise
+            self.show('Not deleted: ' + str(error.body.get('message', '')))
+            return
+        title = next((one.get('title', '') for one in self.listed if one.get('id') == target), '') or 'The conversation'
+        self.listed = [one for one in self.listed if one.get('id') != target]
+        if target == self.conversation:
+            self.conversation = ''
+            self.turn, self.view, self.local, self.finished = '', {}, None, False
+            self.show(f'Deleted: {title}. The next message starts a new conversation.')
+        else:
+            self.show(f'Deleted: {title}.')
+
     def open(self, arg):
         """Continue a conversation: its history first, then the prompt."""
         self.supports_conversations()
@@ -439,6 +470,9 @@ class Terminal:
             return
         if verb in ('/archive', '/unarchive'):
             self.archive(arg, verb == '/archive')
+            return
+        if verb == '/delete':
+            self.delete(arg)
             return
         if verb in ('/new', '/leave'):
             self.show(f'Left turn {self.turn or "(none)"}; accepted work is not cancelled.')

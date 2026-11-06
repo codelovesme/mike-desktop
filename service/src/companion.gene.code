@@ -1191,6 +1191,9 @@ Route { method, path, body, headers } =>
     if path = "/v1/chat/archive"
         emit ChatArchive { request = request } to this get archived
         return archived
+    if path = "/v1/chat/delete"
+        emit ChatDelete { request = request } to this get deleted
+        return deleted
     if path = "/v1/chat/resume"
         emit ChatResume { session = session, request = request } to this get resumed
         return resumed
@@ -1704,6 +1707,25 @@ ChatArchive { request } =>
         emit Fail { status = 503, error = "mike_unavailable", message = "Mike could not archive the conversation" } to this get unavailable
         return unavailable
     return Answer { status = 200, value = { conversation_id = archived.conversation_id, archived = archived.archived } }
+
+| `/delete` (ticket 193): the conversation and its messages and summary go
+| for good, the same `DeleteConversation` Mike's page sends. What Mike
+| learned from it stays (the owner's decision: memory is permanent).
+ChatDelete { request } =>
+    if account_token = ""
+        emit Fail { status = 409, error = "signed_out", message = "connect an account first" } to this get out
+        return out
+    if request.conversation_id ∉ String or request.conversation_id = ""
+        emit Fail { status = 400, error = "bad_request", message = "conversation_id is required" } to this get empty
+        return empty
+    emit ApiCall { app = "mike", particle = Impulse { token = account_token, particle = DeleteConversation { conversation_id = request.conversation_id } } } to this get deleted
+    if deleted ∈ Rejected and deleted.reason ∈ String
+        emit Fail { status = 409, error = "not_deleted", message = deleted.reason } to this get refused
+        return refused
+    if deleted ∉ ConversationDeleted
+        emit Fail { status = 503, error = "mike_unavailable", message = "Mike could not delete the conversation" } to this get unavailable
+        return unavailable
+    return Answer { status = 200, value = { conversation_id = deleted.conversation_id, deleted = deleted.deleted } }
 
 | A recording, as words: Mike's `Hear`, the same road a spoken question
 | takes from Mike's own pages. Nothing is kept here; the words go back to

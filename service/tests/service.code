@@ -459,6 +459,13 @@ assert archived_list.status = 200
 emit Posted to http get list_posts
 emit Parse { text = list_posts.items[0].body } to json get list_post
 assert list_post.value.particle._class = "Conversations" and list_post.value.particle.archived
+emit Reply { body = "{\"_class\":\"ConversationDeleted\",\"conversation_id\":\"conv-1\",\"deleted\":3}" } to http
+emit Call { method = "POST", path = "/v1/chat/delete", body = "{\"conversation_id\":\"conv-1\"}", bearer = asker_token, extra = {} } to this get deleted
+assert deleted.status = 200 and deleted.value.deleted = 3
+emit LastPost to this get delete_post
+assert delete_post.value.particle._class = "DeleteConversation" and delete_post.value.particle.conversation_id = "conv-1"
+emit Call { method = "POST", path = "/v1/chat/delete", body = "{}", bearer = asker_token, extra = {} } to this get delete_unnamed
+assert delete_unnamed.status = 400
 emit Reply { body = "{\"_class\":\"Busy\",\"turn_id\":\"turn-run\",\"conversation_id\":\"conv-1\",\"reason\":\"Mike is still working\"}" } to http
 emit Call { method = "POST", path = "/v1/chat/ask", body = "{\"text\":\"again\",\"conversation_id\":\"conv-1\"}", bearer = asker_token, extra = {} } to this get busy
 assert busy.status = 409 and busy.value.error = "busy" and busy.value.turn_id = "turn-run"

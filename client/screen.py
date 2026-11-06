@@ -61,6 +61,7 @@ COMMANDS = [
     ('/rename', '[N] TITLE', 'name this conversation (or N from /conversations)'),
     ('/archive', '[N]', 'put a conversation away; it is kept'),
     ('/unarchive', '[N]', 'bring an archived conversation back'),
+    ('/delete', '[N]', 'delete a conversation for good (asks first)'),
     ('/stop', '', "stop the command Mike is running on this computer"),
     ('/resume', 'TURN', 'follow an earlier turn by its id'),
     ('/unqueue', '', 'take back the messages waiting to be sent'),

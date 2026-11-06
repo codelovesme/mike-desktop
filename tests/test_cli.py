@@ -144,6 +144,28 @@ class CliTest(unittest.TestCase):
         self.service.call = refuse
         self.cli.command('/rename sk-123')
         self.assertIn('Not renamed: that title looks like a password or key', self.out.getvalue())
+    def test_delete_asks_first_then_forgets_the_open_conversation(self):
+        listing = {'items':[{'id':'c-desk','title':'Fix the build','updated_at':1793570000,'devices':[]}],'has_more':False,'devices':[]}
+        def call(route, body):
+            self.service.calls.append((route, body))
+            if route.endswith('/conversations'): return listing
+            if route.endswith('/delete'): return {'conversation_id':body['conversation_id'], 'deleted':2}
+            return self.service.progress
+        self.service.call = call
+        self.cli.status.update(conversations=True, rename_archive=True)
+        with self.assertRaises(ValueError): self.cli.command('/delete yes')  # nothing chosen
+        self.cli.command('/conversations')
+        self.cli.conversation = 'c-desk'
+        n = len(self.service.calls)
+        self.cli.command('/delete 1')
+        self.assertEqual(len(self.service.calls), n)  # only asked
+        self.assertIn('/delete yes deletes it', self.out.getvalue())
+        self.cli.command('/delete yes')
+        self.assertEqual(self.service.calls[-1], ('/v1/chat/delete', {'conversation_id':'c-desk'}))
+        self.assertEqual(self.cli.conversation, '')
+        self.assertEqual(self.cli.listed, [])
+        self.assertIn('Deleted: Fix the build. The next message starts a new conversation.', self.out.getvalue())
+        with self.assertRaises(ValueError): self.cli.command('/delete yes')  # one yes, one delete
     def test_busy_conversation_follows_the_running_turn(self):
         self.cli.status['conversations'] = True
         self.cli.conversation = 'c-desk'
