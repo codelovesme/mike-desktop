@@ -141,7 +141,18 @@ class Terminal:
             body['images'] = attachments
         elif attachments:
             raise ValueError('upgrade Mike service to send images')
-        started = self.service.call('/v1/chat/ask', body)
+        try:
+            started = self.service.call('/v1/chat/ask', body)
+        except ServiceError as error:
+            busy = error.body.get('turn_id')
+            if error.error != 'busy' or not isinstance(busy, str):
+                raise
+            # Ticket 193: one turn at a time per conversation. The message is
+            # not sent; follow the turn that is running (another device's).
+            self.show('Not sent: ' + str(error.body.get('message', 'Mike is still working on this conversation')) +
+                      '\nFollowing the running turn; send your message again when it ends.')
+            self.resume(busy)
+            return
         self.turn = started['turn_id']
         if isinstance(started.get('conversation_id'), str):
             self.conversation = started['conversation_id']
@@ -234,6 +245,8 @@ class Terminal:
             raise ValueError('upgrade mike-service to list conversations')
 
     def conversations(self, arg='', limit=20, start=False):
+        if arg == 'archived':
+            return self.archived_conversations(limit)
         """The person's conversations with Mike, the same list Mike's pages
         show: this computer's by default, `all` for every one. At start the
         few latest are shown, and nothing when there are none."""
@@ -259,6 +272,84 @@ class Terminal:
         else:
             lines.append('/open N continues one; /new starts a new one.' + ('' if which == 'all' else ' /conversations all lists every computer\'s.'))
         self.show('\n'.join(lines))
+
+    def supports_rename_archive(self):
+        if not self.status.get('rename_archive'):
+            raise ValueError('upgrade mike-service to rename or archive conversations')
+
+    def archived_conversations(self, limit=20):
+        """/conversations archived: the ones put away, every computer's."""
+        self.supports_conversations()
+        self.supports_rename_archive()
+        found = self.service.call('/v1/chat/conversations', {'device':'all', 'limit':limit, 'archived':True})
+        self.listed = found.get('items', [])
+        if not self.listed:
+            self.show('No archived conversations.')
+            return
+        lines = ['Archived conversations:']
+        for number, one in enumerate(self.listed, 1):
+            when = time.strftime('%Y-%m-%d %H:%M', time.localtime(one.get('updated_at') or 0))
+            lines.append(f"{number:>2}. {one.get('title', '')}\n    {when}")
+        lines.append('/unarchive N brings one back; /open N continues one (that brings it back too).')
+        self.show('\n'.join(lines))
+
+    def chosen(self, arg, verb):
+        """The conversation a command means: a number from the last list, or
+        the open one when none is given."""
+        if not arg:
+            if not self.conversation:
+                raise ValueError(f'no conversation open; {verb} N names one from /conversations')
+            return self.conversation
+        if arg.isdigit():
+            if not 1 <= int(arg) <= len(self.listed):
+                raise ValueError('no such number; /conversations lists them')
+            return self.listed[int(arg) - 1]['id']
+        raise ValueError(f'{verb} takes a number from /conversations')
+
+    def rename(self, arg):
+        """/rename TITLE names the open conversation; /rename N TITLE one
+        from the last list. Mike trims it and refuses a credential-like one."""
+        self.supports_rename_archive()
+        first, _, rest = arg.partition(' ')
+        target = ''
+        if first.isdigit() and rest.strip():
+            target, title = self.chosen(first, '/rename'), rest.strip()
+        else:
+            title = arg.strip()
+        if not title:
+            raise ValueError('/rename needs a title')
+        target = target or self.chosen('', '/rename')
+        try:
+            done = self.service.call('/v1/chat/rename', {'conversation_id':target, 'title':title})
+        except ServiceError as error:
+            if error.error != 'not_renamed':
+                raise
+            self.show('Not renamed: ' + str(error.body.get('message', '')))
+            return
+        for one in self.listed:
+            if one.get('id') == target: one['title'] = done.get('title', title)
+        self.show('Renamed: ' + str(done.get('title', title)))
+
+    def archive(self, arg, put_away=True):
+        """/archive [N] puts a conversation away (kept, out of the list);
+        /unarchive [N] brings it back."""
+        self.supports_rename_archive()
+        verb = '/archive' if put_away else '/unarchive'
+        target = self.chosen(arg, verb)
+        try:
+            self.service.call('/v1/chat/archive', {'conversation_id':target, 'archived':put_away})
+        except ServiceError as error:
+            if error.error != 'not_archived':
+                raise
+            self.show(('Not archived: ' if put_away else 'Not brought back: ') + str(error.body.get('message', '')))
+            return
+        title = next((one.get('title', '') for one in self.listed if one.get('id') == target), '') or 'the conversation'
+        if put_away:
+            self.listed = [one for one in self.listed if one.get('id') != target]
+            self.show(f'Archived: {title}. It is kept; /conversations archived lists it.' +
+                      (' Speaking here brings it back.' if target == self.conversation else ''))
+        else:
+            self.show(f'Back in the list: {title}.')
 
     def open(self, arg):
         """Continue a conversation: its history first, then the prompt."""
@@ -342,6 +433,12 @@ class Terminal:
             return
         if verb == '/compact':
             self.compact()
+            return
+        if verb == '/rename':
+            self.rename(arg)
+            return
+        if verb in ('/archive', '/unarchive'):
+            self.archive(arg, verb == '/archive')
             return
         if verb in ('/new', '/leave'):
             self.show(f'Left turn {self.turn or "(none)"}; accepted work is not cancelled.')

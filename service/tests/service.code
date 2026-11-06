@@ -429,6 +429,37 @@ emit Reply { body = "{\"_class\":\"MemoryFailed\",\"reason\":\"down\"}" } to htt
 emit Call { method = "POST", path = "/v1/chat/compact", body = "{\"conversation_id\":\"conv-1\"}", bearer = asker_token, extra = {} } to this get compact_down
 assert compact_down.status = 503
 
+| Ticket 193: /rename and /archive forward Mike's own requests; the list can
+| ask for archived conversations; a second message while Mike works is busy.
+emit Call { method = "POST", path = "/v1/chat/rename", body = "{\"conversation_id\":\"conv-1\"}", bearer = asker_token, extra = {} } to this get rename_untitled
+assert rename_untitled.status = 400
+emit Reply { body = "{\"_class\":\"ConversationRenamed\",\"conversation_id\":\"conv-1\",\"title\":\"Desk\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/rename", body = "{\"conversation_id\":\"conv-1\",\"title\":\" Desk \"}", bearer = asker_token, extra = {} } to this get renamed
+assert renamed.status = 200 and renamed.value.title = "Desk"
+emit LastPost to this get rename_post
+assert rename_post.value.particle._class = "RenameConversation" and rename_post.value.particle.title = " Desk "
+emit Reply { body = "{\"_class\":\"Rejected\",\"reason\":\"that title looks like a password or key\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/rename", body = "{\"conversation_id\":\"conv-1\",\"title\":\"x\"}", bearer = asker_token, extra = {} } to this get rename_refused
+assert rename_refused.status = 409 and rename_refused.value.message = "that title looks like a password or key"
+emit Reply { body = "{\"_class\":\"ConversationArchived\",\"conversation_id\":\"conv-1\",\"archived\":true}" } to http
+emit Call { method = "POST", path = "/v1/chat/archive", body = "{\"conversation_id\":\"conv-1\"}", bearer = asker_token, extra = {} } to this get put_away
+assert put_away.status = 200 and put_away.value.archived
+emit LastPost to this get archive_post
+assert archive_post.value.particle._class = "ArchiveConversation" and archive_post.value.particle.archived
+emit Reply { body = "{\"_class\":\"ConversationArchived\",\"conversation_id\":\"conv-1\",\"archived\":false}" } to http
+emit Call { method = "POST", path = "/v1/chat/archive", body = "{\"conversation_id\":\"conv-1\",\"archived\":false}", bearer = asker_token, extra = {} } to this get brought_back
+assert brought_back.status = 200 and not brought_back.value.archived
+emit LastPost to this get unarchive_post
+assert not unarchive_post.value.particle.archived
+emit Reply { body = "{\"_class\":\"ConversationList\",\"ok\":true,\"items\":[],\"has_more\":false}" } to http
+emit Call { method = "POST", path = "/v1/chat/conversations", body = "{\"device\":\"all\",\"archived\":true}", bearer = asker_token, extra = {} } to this get archived_list
+assert archived_list.status = 200
+emit LastPost to this get list_post
+assert list_post.value.particle._class = "Conversations" and list_post.value.particle.archived
+emit Reply { body = "{\"_class\":\"Busy\",\"turn_id\":\"turn-run\",\"conversation_id\":\"conv-1\",\"reason\":\"Mike is still working\"}" } to http
+emit Call { method = "POST", path = "/v1/chat/ask", body = "{\"text\":\"again\",\"conversation_id\":\"conv-1\"}", bearer = asker_token, extra = {} } to this get busy
+assert busy.status = 409 and busy.value.error = "busy" and busy.value.turn_id = "turn-run"
+
 | A speech receipt is session-bound, and ready audio is delivered once.
 emit Reply { body = "{\"_class\":\"Speaking\",\"reading_id\":\"read-1\"}" } to http
 emit Call { method = "POST", path = "/v1/chat/read", body = "{\"text\":\"Hello\"}", bearer = asker_token, extra = {} } to this get reading

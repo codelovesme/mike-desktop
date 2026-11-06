@@ -104,6 +104,61 @@ class CliTest(unittest.TestCase):
             raise ServiceError(503, {'error':'mike_unavailable', 'message':'down'})
         self.service.call = down
         with self.assertRaises(ServiceError): self.cli.command('/compact')
+    def test_rename_archive_and_archived_list(self):
+        listing = {'items':[{'id':'c-desk','title':'Fix the build','updated_at':1793570000,'devices':[]},
+                            {'id':'c-web','title':'Weather','updated_at':1793560000,'devices':[]}],'has_more':False,'devices':[]}
+        def call(route, body):
+            self.service.calls.append((route, body))
+            if route.endswith('/conversations'): return listing
+            if route.endswith('/rename'): return {'conversation_id':body['conversation_id'], 'title':body['title'].strip()}
+            if route.endswith('/archive'): return {'conversation_id':body['conversation_id'], 'archived':body['archived']}
+            return self.service.progress
+        self.service.call = call
+        self.cli.status['conversations'] = True
+        with self.assertRaises(ValueError): self.cli.command('/rename Desk')  # an older service
+        self.cli.status['rename_archive'] = True
+        self.cli.conversation = ''
+        with self.assertRaises(ValueError): self.cli.command('/rename Desk')  # nothing open
+        with self.assertRaises(ValueError): self.cli.command('/archive')
+        self.cli.command('/conversations')
+        self.cli.command('/rename 2 Rain later')
+        self.assertEqual(self.service.calls[-1], ('/v1/chat/rename', {'conversation_id':'c-web', 'title':'Rain later'}))
+        self.assertIn('Renamed: Rain later', self.out.getvalue())
+        self.cli.conversation = 'c-desk'
+        self.cli.command('/rename Desk work')
+        self.assertEqual(self.service.calls[-1], ('/v1/chat/rename', {'conversation_id':'c-desk', 'title':'Desk work'}))
+        with self.assertRaises(ValueError): self.cli.command('/rename')
+        self.cli.command('/archive 1')
+        self.assertEqual(self.service.calls[-1], ('/v1/chat/archive', {'conversation_id':'c-desk', 'archived':True}))
+        self.assertIn('Archived: Desk work', self.out.getvalue())
+        self.assertIn('Speaking here brings it back', self.out.getvalue())
+        self.assertEqual([one['id'] for one in self.cli.listed], ['c-web'])
+        self.cli.command('/conversations archived')
+        self.assertEqual(self.service.calls[-1], ('/v1/chat/conversations', {'device':'all', 'limit':20, 'archived':True}))
+        self.assertIn('Archived conversations:', self.out.getvalue())
+        self.cli.command('/unarchive 1')
+        self.assertEqual(self.service.calls[-1], ('/v1/chat/archive', {'conversation_id':'c-desk', 'archived':False}))
+        self.assertIn('Back in the list', self.out.getvalue())
+        def refuse(route, body):
+            raise ServiceError(409, {'error':'not_renamed', 'message':'that title looks like a password or key'})
+        self.service.call = refuse
+        self.cli.command('/rename sk-123')
+        self.assertIn('Not renamed: that title looks like a password or key', self.out.getvalue())
+    def test_busy_conversation_follows_the_running_turn(self):
+        self.cli.status['conversations'] = True
+        self.cli.conversation = 'c-desk'
+        def call(route, body):
+            self.service.calls.append((route, body))
+            if route.endswith('/ask'):
+                raise ServiceError(409, {'error':'busy', 'message':'Mike is still working', 'turn_id':'t-run', 'conversation_id':'c-desk'})
+            if route.endswith('/resume'):
+                return {'turn_id':'t-run', 'stage':'working', 'say':'', 'steps':[]}
+            return self.service.progress
+        self.service.call = call
+        self.cli.ask('again')
+        self.assertEqual(self.service.calls[-1], ('/v1/chat/resume', {'turn_id':'t-run'}))
+        self.assertEqual(self.cli.turn, 't-run')
+        self.assertIn('Not sent: Mike is still working', self.out.getvalue())
     def test_start_shows_latest_conversations_quietly(self):
         found = {'items':[], 'has_more':False, 'devices':[]}
         def call(route, body):
