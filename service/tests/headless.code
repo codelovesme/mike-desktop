@@ -364,3 +364,20 @@ emit Deliver { kind = "TerminalStep", step = { id = "s-11", argv = ["ls"], cwd =
 assert seen_before_restart.posts[0].particle.grants[0].id = "g-saved"
 emit Includes { text = seen_before_restart.report.stderr, needle = "delivered again" } to this get not_repeated
 assert not_repeated.yes
+
+| ---- One call per pulse, paced by the server (ticket 352) ----
+|
+| A server that reads `claim` hands the task back in the heartbeat's answer
+| and says when to come back: no separate ClaimTask, and no call before then.
+emit Posts to this get _settled
+emit Reply { body = "{\"_class\":\"DeviceOnline\",\"device_id\":\"srv-1\",\"at\":20,\"revoked_grants\":[],\"claimed\":true,\"pulse_ms\":15000,\"task\":{\"_class\":\"TerminalStep\",\"id\":\"s-11\",\"argv\":[\"ls\"],\"cwd\":\"/srv/app\",\"device_id\":\"srv-1\",\"grant_id\":\"g-saved\",\"confirmed\":false}}" } to http
+emit Reply { body = "{\"_class\":\"TaskCompleted\",\"id\":\"s-11\",\"replayed\":false}" } to http
+emit ServiceTick to this
+emit Posts to this get paced
+emit Classes { posts = paced.items } to this get paced_classes
+assert paced_classes.items = ["Open:Heartbeat", "Open:CompleteTerminalStep"]
+assert paced.items[0].particle.claim = true
+assert paced.items[1].particle.id = "s-11"
+emit ServiceTick to this
+emit Posts to this get quiet
+assert quiet.items = []
