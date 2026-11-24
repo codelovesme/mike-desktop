@@ -56,6 +56,9 @@ headless = false
 enrollment = null
 grants = []
 seen_tasks = []
+| When the next pulse is due, in the server's seconds. Zero: every tick,
+| which is what an older server (one that does not pace) still gets.
+pulse_due_at = 0
 
 Capabilities =>
     items = ["terminal", "terminal_modes_v1", "terminal_home_v1"]
@@ -614,7 +617,7 @@ ServiceTick =>
     emit Timestamp to core get now
     emit ExpireSessions { now = now.value } to this
     emit MaintainAccount { now = now.value } to this
-    if credential ≠ "" and (account_token ≠ "" or headless)
+    if credential ≠ "" and (account_token ≠ "" or headless) and now.value ≥ pulse_due_at
         emit Pulse to this
     if enrollment ≠ null
         emit PollEnrollment { now = now.value } to this
@@ -625,10 +628,16 @@ ServiceTick =>
     emit Delay { ms = 2000, then = "ServiceTick" } to clock
     return Ticked
 
+| One call: "here", and — with no work in hand — "anything for me?". A
+| server that reads `claim` says so with `claimed`, hands the task back in
+| the same answer and says when to come back (`pulse_ms`); an older one
+| gets the separate ClaimTask it always got, every tick.
 Pulse =>
     emit Capabilities to this get offered
     emit AdvertisedGrants to this get advertised
-    emit Gateway { particle = Heartbeat { device_id = device_id, credential = credential, capabilities = offered.items, grants = advertised.items } } to this get pulse
+    claiming = false
+    if work = null, claiming = true
+    emit Gateway { particle = Heartbeat { device_id = device_id, credential = credential, capabilities = offered.items, grants = advertised.items, claim = claiming } } to this get pulse
     if pulse ∈ Forbidden
         emit LoseDevice { detail = "this computer's access was revoked" } to this
         return Revoked
@@ -644,6 +653,14 @@ Pulse =>
     if recovery ≠ null
         emit ReportRecovery to this
     if work ≠ null
+        return Online
+    if pulse.claimed = true
+        pace = 2000
+        if pulse.pulse_ms ∈ Number and pulse.pulse_ms ≥ 1000 and pulse.pulse_ms ≤ 30000, pace = pulse.pulse_ms
+        emit Timestamp to core get pulsed
+        pulse_due_at = pulsed.value + pace / 1000
+        if pulse.task ∈ InterfaceTask or pulse.task ∈ TerminalStep
+            emit ReceiveWork { task = pulse.task } to this
         return Online
     emit Gateway { particle = ClaimTask { device_id = device_id, credential = credential } } to this get task
     if task ∈ Forbidden
